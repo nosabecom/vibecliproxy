@@ -38,7 +38,9 @@ let state = null, session = null, page = location.hash.slice(1) || 'overview', l
 const app = document.querySelector('#app'), modal = document.querySelector('#modal');
 let toastTimer;
 let lastRefreshAt = 0;
-const activityFilters = { search: '', person: '', result: '', model: '', provider: '', route: '', endpoint: '', time: '' };
+const activityFilters = { search: '', person: '', account: '', result: '', model: '', provider: '', route: '', endpoint: '', time: '' };
+let activityPage = null, activityController = null, activityTimer, activityVersion = 0, activityLoading = false;
+const activityPaging = { offset: 0, limit: 100, snapshot: null };
 function toast(message, error=false) { const el=document.querySelector('#toast');el.textContent=message;el.className=`show${error?' error':''}`;clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='',5000); }
 async function api(path, options={}) {
   const response=await fetch(`${basePath}/api${path}`,{...options,headers:{'Content-Type':'application/json',...(session?.csrf?{'X-CSRF-Token':session.csrf}:{}),...options.headers},...(options.body?{body:JSON.stringify(options.body)}:{})});
@@ -64,6 +66,8 @@ function render(){
  if(!tabs.some(t=>t[0]===page))page='overview';
  const current=tabs.find(t=>t[0]===page), healthy=!state.proxy.error, name=new URL(state.publicBaseUrl).hostname.split('.')[0];
  app.innerHTML=`<div class="layout"><aside class="sidebar">${brand()}<div class="workspace"><div class="workspace-icon">${icon('server')}</div><div><b>${escape(name)}</b><span>Personal workspace</span></div><i class="dot ${healthy?'':'warn'}"></i></div><div class="nav-label">Workspace</div><nav aria-label="Main navigation">${tabs.map(([id,i,label])=>`<button data-page="${id}" class="${page===id?'active':''}" ${page===id?'aria-current="page"':''}>${icon(i)}${label}${id==='people'?`<span class="nav-count">${state.members.length}</span>`:''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="host-note">${icon('lock')} Tailscale only</div><div class="identity"><span class="avatar">N</span><div><b>Your workspace</b><span>Administrator</span></div><button class="ghost icon-button" data-action="logout" aria-label="Sign out">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">Workspace<span>/</span><b>${current[2]}</b></div><div class="top-actions"><span class="status-pill"><i class="dot ${state.settings.paused?'warn':healthy?'':'warn'}"></i>${state.settings.paused?'Sharing paused':healthy?'Hub online':'Needs attention'}</span><button class="ghost small" data-action="refresh" aria-label="Refresh hub">${icon('refresh')}<span>Refresh</span></button></div></header><div class="content">${state.proxy.error?`<div class="alert">${icon('info')}${escape(state.proxy.error)}</div>`:''}${state.settings.paused?`<div class="alert">${icon('pause')}Backup access paused.<button class="small ghost" data-action="toggle-global">Resume</button></div>`:''}${renderPage()}<footer class="footer"><span>${icon('shield')} Private hub</span><span>${icon('server')} Hosted on ${escape(name)} <span>·</span> Quota checked ${age(state.proxy.lastSync).toLowerCase()}</span></footer></div></main></div>`;
+ if(page==='activity')void loadActivity();
+ else {activityController?.abort();clearTimeout(activityTimer);}
 }
 function heading(eyebrow,title,subtitle,actions=''){return `<div class="page-heading"><div><h1>${title}</h1>${subtitle?`<p class="subtext">${subtitle}</p>`:''}</div>${actions?`<div class="heading-actions">${actions}</div>`:''}</div>`;}
 function metric(label,value,foot,i){return `<div class="metric"><div class="metric-top">${label}${icon(i)}</div><div class="metric-value">${value}</div><div class="metric-foot">${foot}</div></div>`;}
@@ -109,74 +113,113 @@ function activityTone(event) {
  if(event.status===429||event.status===499||event.reason==='access_changed'||event.reason==='hub_restarting')return 'warn';
  return 'red';
 }
-function matchingActivity() {
- const query = activityFilters.search.toLowerCase().trim();
- const since = activityFilters.time ? Date.now()-Number(activityFilters.time) : null;
- return state.history.filter(event => {
-  if(activityFilters.person && event.member_id!==activityFilters.person)return false;
-  if(activityFilters.model && event.model!==activityFilters.model)return false;
-  if(activityFilters.provider && event.details?.provider!==activityFilters.provider)return false;
-  if(activityFilters.route && event.details?.route!==activityFilters.route)return false;
-  if(activityFilters.endpoint && event.details?.path!==activityFilters.endpoint)return false;
-  if(since!==null && event.at<since)return false;
-  if(activityFilters.result==='active' && event.status!==102)return false;
-  if(['receiving','queued','running'].includes(activityFilters.result) && !(event.status===102&&event.details?.state===activityFilters.result))return false;
-  if(activityFilters.result==='completed' && !(event.status>=200&&event.status<300))return false;
-  if(activityFilters.result==='cancelled' && event.status!==499)return false;
-  if(activityFilters.result==='errors' && !(event.status>=400&&event.status!==499))return false;
-  if(activityFilters.result==='limited' && event.status!==429)return false;
-  const text = [event.id,event.member_name,event.model,event.reason,event.details?.path,event.details?.promptPreview,event.details?.errorMessage].join(' ').toLowerCase();
-  return !query || text.includes(query);
- });
-}
+function activityAccount(event) { return event.details?.accountLabel || state.accounts.find(account=>account.id===event.account_id)?.email || event.account_id || 'No account selected'; }
+function activityRoute(event) { return event.details?.route==='shared'?'Shared backup':event.details?.route==='personal'?'Personal':event.account_id?'Not recorded':'Not routed'; }
 function activityRows(events) {
  return events.map(event => {
   const details = event.details;
-  const route = details?.route==='shared'?'Shared backup':details?.route==='personal'?'Personal':'—';
+  const route = activityRoute(event);
   const duration = event.status===102?Date.now()-event.at:event.duration;
-  return `<tr><td>${escape(event.member_name)}</td><td class="request-cell"><b class="mono">${escape(event.model||'—')}</b><span class="request-path">${escape(details?`${details.method} ${details.path}`:'')}</span>${details?.promptPreview?`<span class="request-excerpt">${escape(details.promptPreview.slice(0,140))}</span>`:''}</td><td>${route}</td><td><span class="tag ${activityTone(event)}">${activityResult(event)}</span></td><td class="mono">${(duration/1000).toFixed(1)}s</td><td title="${new Date(event.at).toLocaleString()}">${age(event.at)}</td><td><button class="ghost small" data-action="request-details" data-id="${escape(event.id)}">Details</button></td></tr>`;
- }).join('') || '<tr><td colspan="7" class="muted">No matching requests</td></tr>';
+  return `<tr><td>${escape(event.member_name)}</td><td class="request-cell"><b class="mono">${escape(event.model||'—')}</b><span class="request-path">${escape(details?`${details.method} ${details.path}`:'')}</span>${details?.promptPreview?`<span class="request-excerpt">${escape(details.promptPreview.slice(0,140))}</span>`:''}</td><td class="request-account">${escape(activityAccount(event))}</td><td>${route}</td><td><span class="tag ${activityTone(event)}">${activityResult(event)}</span></td><td class="mono">${(duration/1000).toFixed(1)}s</td><td title="${new Date(event.at).toLocaleString()}">${new Date(event.at).toLocaleString()}</td><td><button class="ghost small" data-action="request-details" data-id="${escape(event.id)}">Details</button></td></tr>`;
+ }).join('') || '<tr><td colspan="8" class="muted">No matching requests</td></tr>';
 }
 function activitySelect(name, label, options) {
  const selected = activityFilters[name];
- // Keep the selected option visible when its last request leaves the latest 100.
+ // Keep historical selections visible while refreshing filter options.
  if(selected && !options.some(([value])=>value===selected))options=[...options,[selected,selected]];
  return `<label>${label}<select data-activity-filter="${name}" aria-label="Filter requests by ${label.toLowerCase()}">${options.map(([value,text])=>`<option value="${escape(value)}" ${selected===value?'selected':''}>${escape(text)}</option>`).join('')}</select></label>`;
 }
 function renderActivity() {
- const people = [...new Map(state.history.map(event=>[event.member_id,event.member_name])).entries()];
- const values = read => [...new Set(state.history.map(read).filter(Boolean))].sort().map(value=>[value,value]);
- const events = matchingActivity();
+ const options = activityOptions();
+ const events = activityPage?.events ?? [];
  return heading('','Activity','','') + `<div class="activity-filters" role="group" aria-label="Request filters">
  <label class="activity-search">Search<input data-activity-filter="search" aria-label="Search requests" placeholder="Search prompts, models, errors…" value="${escape(activityFilters.search)}"></label>
- ${activitySelect('person','Person',[['','All people'],...people])}
+ ${activitySelect('person','Person',options.person)}
+ ${activitySelect('account','Account',options.account)}
  ${activitySelect('result','Result',[['','All results'],['active','In progress'],['receiving','Receiving'],['queued','Queued'],['running','Running'],['completed','Completed'],['cancelled','Cancelled'],['errors','Errors and limits'],['limited','Rate limited (429)']])}
- ${activitySelect('model','Model',[['','All models'],...values(event=>event.model)])}
+ ${activitySelect('model','Model',options.model)}
  ${activitySelect('provider','Provider',[['','All providers'],['codex','Codex'],['claude','Claude']])}
- ${activitySelect('route','Route',[['','All routes'],['personal','Personal'],['shared','Shared backup']])}
- ${activitySelect('endpoint','Endpoint',[['','All endpoints'],...values(event=>event.details?.path)])}
+ ${activitySelect('route','Route',[['','All routes'],['personal','Personal'],['shared','Shared backup'],['unknown','Route not recorded']])}
+ ${activitySelect('endpoint','Endpoint',options.endpoint)}
  ${activitySelect('time','Time range',[['','Any time'],['900000','Last 15 minutes'],['3600000','Last hour'],['86400000','Last 24 hours'],['604800000','Last 7 days']])}
  <button type="button" data-action="clear-activity-filters" ${Object.values(activityFilters).some(Boolean)?'':'disabled'}>Clear filters</button>
- </div><div class="card"><div class="card-head"><div><h2>Recent requests</h2><p>Filters apply to the latest 100 · Details 90 days · Previews 7 days</p></div><span class="tag" id="activity-count" role="status">${events.length} requests</span></div><div class="table-wrap"><table><thead><tr><th>Person</th><th>Request</th><th>Route</th><th>Result</th><th>Duration</th><th>When</th><th></th></tr></thead><tbody id="activity-rows">${activityRows(events)}</tbody></table></div></div>`;
+ </div><div class="card" id="activity-results" aria-busy="true"><div class="card-head"><div><h2>Request history</h2><p>Search and filter all retained requests · History 90 days · Previews 7 days</p></div><span class="tag" id="activity-count" role="status">Loading…</span></div><div class="table-wrap"><table><thead><tr><th>Person</th><th>Request</th><th>Account</th><th>Route</th><th>Result</th><th>Duration</th><th>When</th><th></th></tr></thead><tbody id="activity-rows">${activityRows(events)}</tbody></table></div><div id="activity-pagination">${activityPagination()}</div></div>`;
+}
+function activityOptions() {
+ const options = activityPage?.options;
+ const accounts = new Map(state.accounts.map(account=>[account.id,account.email]));
+ for(const account of options?.accounts ?? [])if(!accounts.has(account.id))accounts.set(account.id,account.label);
+ return {
+  person:[['','All people'],...(options?.people ?? state.members.map(member=>({id:member.id,label:member.name}))).map(person=>[person.id,person.label])],
+  account:[['','All accounts'],...[...accounts].sort((a,b)=>a[1].localeCompare(b[1]))],
+  model:[['','All models'],...(options?.models ?? []).map(value=>[value,value])],
+  endpoint:[['','All endpoints'],...(options?.endpoints ?? []).map(value=>[value,value])],
+ };
+}
+function activityPagination() {
+ const total=activityPage?.total ?? 0, offset=activityPage?.offset ?? 0, size=activityPaging.limit;
+ return `<div class="activity-pagination"><span role="status">${activityLoading?'Loading…':total?`${count(offset+1)}–${count(Math.min(offset+size,total))} of ${count(total)}`:'0 requests'}</span><label>Per page <select data-activity-page-size aria-label="Requests per page">${[25,50,100].map(value=>`<option value="${value}" ${size===value?'selected':''}>${value}</option>`).join('')}</select></label><div class="activity-page-actions"><button class="small" data-action="activity-latest" ${activityLoading?'disabled':''}>Latest</button><button class="small" data-action="activity-newer" ${activityLoading||offset===0?'disabled':''}>← Newer</button><button class="small" data-action="activity-older" ${activityLoading||offset+size>=total?'disabled':''}>Older →</button></div></div>`;
+}
+async function loadActivity() {
+ clearTimeout(activityTimer);
+ activityController?.abort();
+ const controller=activityController=new AbortController(), version=++activityVersion;
+ const params=new URLSearchParams(Object.entries(activityFilters).filter(([,value])=>value));
+ params.set('offset',String(activityPaging.offset));params.set('limit',String(activityPaging.limit));
+ if(activityPaging.offset>0 && activityPaging.snapshot!==null)params.set('snapshot',String(activityPaging.snapshot));
+ activityLoading=true;
+ const results=document.querySelector('#activity-results');
+ if(!results)return;
+ results.setAttribute('aria-busy','true');
+ document.querySelector('#activity-count').textContent='Loading…';
+ document.querySelector('#activity-pagination').innerHTML=activityPagination();
+ try {
+  const data=await api(`/activity?${params}`,{signal:controller.signal});
+  if(version!==activityVersion || page!=='activity' || !session?.authenticated)return;
+  activityPage=data;activityPaging.offset=data.offset;activityPaging.snapshot=data.snapshot;
+  document.querySelector('#activity-rows').innerHTML=activityRows(data.events);
+  document.querySelector('#activity-count').textContent=`${count(data.total)} requests`;
+  for(const [name,options] of Object.entries(activityOptions())){
+   const template=document.createElement('template');template.innerHTML=activitySelect(name,name,options);
+   document.querySelector(`[data-activity-filter="${name}"]`).innerHTML=template.content.querySelector('select').innerHTML;
+  }
+ } catch(error) {
+  if(error.name==='AbortError' || version!==activityVersion)return;
+  activityPage=null;
+  if(document.querySelector('#activity-results')){
+   document.querySelector('#activity-rows').innerHTML='<tr><td colspan="8" class="muted">Could not load requests. Select Latest to retry.</td></tr>';
+   document.querySelector('#activity-count').textContent='Requests unavailable';
+  }
+  toast(error.message,true);
+ } finally {
+  if(version===activityVersion){
+   activityLoading=false;
+   document.querySelector('#activity-results')?.setAttribute('aria-busy','false');
+   const pagination=document.querySelector('#activity-pagination');if(pagination)pagination.innerHTML=activityPagination();
+  }
+ }
 }
 function updateActivityFilter(event) {
  const name = event.target.dataset.activityFilter;
  if(!name || !Object.hasOwn(activityFilters,name))return;
  activityFilters[name] = event.target.value;
- const rows = matchingActivity();
- document.querySelector('#activity-rows').innerHTML = activityRows(rows);
- document.querySelector('#activity-count').textContent = `${rows.length} requests`;
+ activityPaging.offset=0;activityPaging.snapshot=null;
  document.querySelector('[data-action="clear-activity-filters"]').disabled = !Object.values(activityFilters).some(Boolean);
+ clearTimeout(activityTimer);
+ // Invalidate in-flight searches immediately, including during the debounce.
+ activityController?.abort();activityVersion++;
+ document.querySelector('#activity-results').setAttribute('aria-busy','true');
+ if(name==='search')activityTimer=setTimeout(()=>void loadActivity(),200);else void loadActivity();
 }
 function requestDetails(id) {
- const event = state.history.find(row=>row.id===id);
- if(!event)return toast('Request is outside the latest 100.');
+ const event = activityPage?.events.find(row=>row.id===id) ?? state.history.find(row=>row.id===id);
+ if(!event)return toast('Request is no longer on this page.');
  const details = event.details;
  const field = (name,value) => `<div><dt>${name}</dt><dd>${escape(value??'—')}</dd></div>`;
  const bytes = value => value===undefined?'—':value<1024?`${value} B`:value<1048576?`${(value/1024).toFixed(1)} KB`:`${(value/1048576).toFixed(2)} MB`;
  const duration = event.status===102?Date.now()-event.at:event.duration;
- const route = details?.route==='shared'?'Shared backup':details?.route==='personal'?'Personal':'—';
- openModal(`${modalTop('Request details',`${escape(event.member_name)} · ${escape(activityResult(event))}`)}<div class="request-id"><code>${escape(event.id)}</code><button class="ghost small" data-action="copy-request-id" data-id="${escape(event.id)}" aria-label="Copy request ID">${icon('copy')}</button></div><dl class="request-details">${field('Received',new Date(event.at).toLocaleString())}${field('Finished',details?.finishedAt?new Date(details.finishedAt).toLocaleString():event.status===102?'In progress':'—')}${field('Endpoint',details?`${details.method} ${details.path}`:null)}${field('Model',event.model)}${field('Provider',details?.provider)}${field('Route',route)}${field('Account',details?.accountLabel)}${field('HTTP result',event.status===102?'Pending':event.status)}${field('Reason',event.reason)}${field('Stopped during',details?.errorPhase)}${field('Total time',`${(duration/1000).toFixed(2)}s`)}${field('Queue time',details?`${(details.queueMs/1000).toFixed(2)}s`:null)}${field('First response byte',details?.firstByteMs===undefined?null:`${(details.firstByteMs/1000).toFixed(2)}s`)}${field('Request size',bytes(details?.requestBytes))}${field('Declared size',bytes(details?.declaredBytes))}${field('Response size',bytes(details?.responseBytes))}${field('Input items',details?.inputItems)}${field('Tools',details?.tools)}${field('Streaming',details?.stream===undefined?null:details.stream?'Yes':'No')}${field('Client',details?.client)}</dl>${details?.errorMessage?`<div class="field"><span class="field-label">Error</span><pre class="request-preview">${escape(details.errorMessage)}</pre></div>`:''}${details?.promptPreview?`<div class="field"><span class="field-label">Latest user prompt · preview</span><pre class="request-preview">${escape(details.promptPreview)}</pre></div>`:''}${!details?'<p class="help-text">Recorded before detailed logging was enabled.</p>':''}${event.status===102?`<div class="form-actions"><button data-action="refresh-request" data-id="${escape(event.id)}">Refresh request</button></div>`:''}`);
+ const route = activityRoute(event);
+ openModal(`${modalTop('Request details',`${escape(event.member_name)} · ${escape(activityResult(event))}`)}<div class="request-id"><code>${escape(event.id)}</code><button class="ghost small" data-action="copy-request-id" data-id="${escape(event.id)}" aria-label="Copy request ID">${icon('copy')}</button></div><dl class="request-details">${field('Received',new Date(event.at).toLocaleString())}${field('Finished',details?.finishedAt?new Date(details.finishedAt).toLocaleString():event.status===102?'In progress':'—')}${field('Endpoint',details?`${details.method} ${details.path}`:null)}${field('Model',event.model)}${field('Provider',details?.provider)}${field('Route',route)}${field('Account',activityAccount(event))}${field('HTTP result',event.status===102?'Pending':event.status)}${field('Reason',event.reason)}${field('Stopped during',details?.errorPhase)}${field('Total time',`${(duration/1000).toFixed(2)}s`)}${field('Queue time',details?`${(details.queueMs/1000).toFixed(2)}s`:null)}${field('First response byte',details?.firstByteMs===undefined?null:`${(details.firstByteMs/1000).toFixed(2)}s`)}${field('Request size',bytes(details?.requestBytes))}${field('Declared size',bytes(details?.declaredBytes))}${field('Response size',bytes(details?.responseBytes))}${field('Input items',details?.inputItems)}${field('Tools',details?.tools)}${field('Streaming',details?.stream===undefined?null:details.stream?'Yes':'No')}${field('Client',details?.client)}</dl>${details?.errorMessage?`<div class="field"><span class="field-label">Error</span><pre class="request-preview">${escape(details.errorMessage)}</pre></div>`:''}${details?.promptPreview?`<div class="field"><span class="field-label">Latest user prompt · preview</span><pre class="request-preview">${escape(details.promptPreview)}</pre></div>`:''}${!details?'<p class="help-text">Recorded before detailed logging was enabled.</p>':''}${event.status===102?`<div class="form-actions"><button data-action="refresh-request" data-id="${escape(event.id)}">Refresh request</button></div>`:''}`);
 }
 function renderConnect(){
  const base=`${state.publicBaseUrl}/v1`;
@@ -311,9 +354,12 @@ document.addEventListener('click',async event=>{
    case 'toggle-global':await api('/settings',{method:'PATCH',body:{paused:!state.settings.paused}});await load();toast(state.settings.paused?'Shared access paused':'Shared access resumed');break;
    case 'pause-person':{const m=state.members.find(m=>m.id===id);await api(`/members/${id}`,{method:'PATCH',body:{paused:!m.paused}});await load();toast(m.paused?'Access resumed':'Access paused');break;}
    case 'request-details':requestDetails(id);break;
-   case 'clear-activity-filters':for(const name of Object.keys(activityFilters))activityFilters[name]='';render();break;
+   case 'clear-activity-filters':for(const name of Object.keys(activityFilters))activityFilters[name]='';activityPaging.offset=0;activityPaging.snapshot=null;render();break;
+   case 'activity-older':activityPaging.offset+=activityPaging.limit;await loadActivity();break;
+   case 'activity-newer':activityPaging.offset=Math.max(0,activityPaging.offset-activityPaging.limit);await loadActivity();break;
+   case 'activity-latest':activityPaging.offset=0;activityPaging.snapshot=null;await loadActivity();break;
    case 'copy-request-id':await copy(id);break;
-   case 'refresh-request':await load();requestDetails(id);break;
+   case 'refresh-request':await load();await loadActivity();requestDetails(id);break;
    case 'toggle-prompt-previews':await api('/settings',{method:'PATCH',body:{promptPreviews:!state.settings.promptPreviews}});await load();break;
    case 'refresh':button.disabled=true;await api('/refresh',{method:'POST'});await load();toast('Hub refreshed. Provider quota pacing still applies.');break;
    case 'logout':await api(memberView?'/member/logout':'/logout',{method:'POST'});session.authenticated=false;state=null;renderLogin();break;
@@ -370,3 +416,4 @@ document.addEventListener('change',async event=>{
 
 document.addEventListener('input',event=>{if(event.target.dataset.activityFilter==='search')updateActivityFilter(event);});
 document.addEventListener('change',event=>{if(event.target.dataset.activityFilter&&event.target.dataset.activityFilter!=='search')updateActivityFilter(event);});
+document.addEventListener('change',event=>{if(event.target.matches('[data-activity-page-size]')){activityPaging.limit=Number(event.target.value);activityPaging.offset=0;activityPaging.snapshot=null;void loadActivity();}});

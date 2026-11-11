@@ -48,6 +48,20 @@ test('routes only to an eligible account, replaces credentials, strips hostile r
  assert.equal(s.calls.length,1);assert.equal(s.calls[0].body.model,'vcp-eligible/test-model');assert.equal(s.calls[0].body.max_output_tokens,8192);
  assert.equal(s.calls[0].headers.authorization,'Bearer upstream-private');assert.equal(s.calls[0].headers['x-cliproxy-auth-index'],undefined);assert.equal(s.calls[0].headers.session_id,undefined);
 });
+test('admin activity queries reach older shared accounts while member keys cannot access history',async t=>{
+ const s=await setup(t), member=s.store.member(s.created.member.id);
+ for(let i=0;i<105;i++)s.store.event(member,'test-model','personal',200,100,null,{method:'POST',path:'/v1/responses',state:'finished',startedAt:Date.now(),requestBytes:0,responseBytes:0,queueMs:0,provider:'codex',route:'personal'},`recent-${i}`);
+ s.store.event(member,'historic-model','old-backup',200,100,null,{method:'POST',path:'/v1/responses',state:'finished',startedAt:Date.now(),requestBytes:0,responseBytes:0,queueMs:0,provider:'codex',route:'shared',accountLabel:'old@test.invalid'},'historic-shared');
+ s.store.db.prepare('UPDATE events SET at=? WHERE id=?').run(Date.now()-6*86400000,'historic-shared');
+ const response=await s.admin('/activity?route=shared&account=old-backup&time=604800000');
+ assert.equal(response.status,200);
+ const result=await response.json();assert.equal(result.total,1);assert.equal(result.events[0].id,'historic-shared');
+ const first=await(await s.admin('/activity?limit=25')).json();assert.equal(first.events.length,25);assert.equal(first.total,106);
+ const older=await(await s.admin(`/activity?limit=25&offset=100&snapshot=${first.snapshot}`)).json();assert.equal(older.events.length,6);assert.ok(older.events.some((event:any)=>event.id==='historic-shared'));
+ assert.equal((await s.admin('/activity?limit=101')).status,400);
+ assert.equal((await fetch(`${s.base}/api/activity`)).status,401);
+ assert.equal((await fetch(`${s.base}/api/activity`,{headers:{Authorization:`Bearer ${s.created.key}`}})).status,401);
+});
 test('reserve, stale quota, malformed model, missing key and expired key block without contacting upstream',async t=>{
  const s=await setup(t);
  s.proxy.accounts[1]!.windows[0]!.usedPercent=20;assert.equal((await s.infer()).status,429);

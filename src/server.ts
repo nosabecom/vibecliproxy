@@ -13,6 +13,7 @@ import { Onboarding, isolatedLoginFactory, type LoginFactory } from './onboardin
 import { usageInventory, usageCall } from './usage-hub.ts';
 import { promptPreview, redactLogText } from './request-log.ts';
 import { REQUEST_LIMITS } from './settings.ts';
+import { activityQuery } from './activity.ts';
 import type { RequestLimits } from './types.ts';
 
 const MAX_BODY = 4 * 1024 * 1024;
@@ -404,6 +405,7 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
         return json(res, 200, { settings, requestLimits: REQUEST_LIMITS, accounts: proxy.accounts, members: members.map(m => ({ ...publicMember(m), access: proxy.accounts.map(a => ({ accountId: a.id, ...eligibility(a, a.ownerMemberId === m.id ? { ...m, sharePercent: 100, accountIds: [] } : m, a.ownerMemberId === m.id ? 0 : settings.safetyMargin) })) })),
           history: store.history(), summary: store.summary(), proxy: { error: proxy.error, lastSync: proxy.lastSync }, publicOrigin: config.publicOrigin, publicBaseUrl: publicBaseUrl(), csrf });
       }
+      if (path === '/api/activity' && req.method === 'GET') return json(res, 200, store.activity(activityQuery(url.searchParams)));
       if (path === '/api/refresh' && req.method === 'POST') { await proxy.sync(); return json(res, 200, { ok: !proxy.error }); }
       if (path === '/api/settings' && req.method === 'PATCH') {
         const body = await readJson(req); const settings = store.settings();
