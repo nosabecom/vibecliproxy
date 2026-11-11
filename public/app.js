@@ -38,7 +38,7 @@ let state = null, session = null, page = location.hash.slice(1) || 'overview', l
 const app = document.querySelector('#app'), modal = document.querySelector('#modal');
 let toastTimer;
 let lastRefreshAt = 0;
-const activityFilters = { search: '', person: '', result: '' };
+const activityFilters = { search: '', person: '', result: '', model: '', provider: '', route: '', endpoint: '', time: '' };
 function toast(message, error=false) { const el=document.querySelector('#toast');el.textContent=message;el.className=`show${error?' error':''}`;clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='',5000); }
 async function api(path, options={}) {
   const response=await fetch(`${basePath}/api${path}`,{...options,headers:{'Content-Type':'application/json',...(session?.csrf?{'X-CSRF-Token':session.csrf}:{}),...options.headers},...(options.body?{body:JSON.stringify(options.body)}:{})});
@@ -111,12 +111,20 @@ function activityTone(event) {
 }
 function matchingActivity() {
  const query = activityFilters.search.toLowerCase().trim();
+ const since = activityFilters.time ? Date.now()-Number(activityFilters.time) : null;
  return state.history.filter(event => {
   if(activityFilters.person && event.member_id!==activityFilters.person)return false;
+  if(activityFilters.model && event.model!==activityFilters.model)return false;
+  if(activityFilters.provider && event.details?.provider!==activityFilters.provider)return false;
+  if(activityFilters.route && event.details?.route!==activityFilters.route)return false;
+  if(activityFilters.endpoint && event.details?.path!==activityFilters.endpoint)return false;
+  if(since!==null && event.at<since)return false;
   if(activityFilters.result==='active' && event.status!==102)return false;
+  if(['receiving','queued','running'].includes(activityFilters.result) && !(event.status===102&&event.details?.state===activityFilters.result))return false;
   if(activityFilters.result==='completed' && !(event.status>=200&&event.status<300))return false;
   if(activityFilters.result==='cancelled' && event.status!==499)return false;
   if(activityFilters.result==='errors' && !(event.status>=400&&event.status!==499))return false;
+  if(activityFilters.result==='limited' && event.status!==429)return false;
   const text = [event.id,event.member_name,event.model,event.reason,event.details?.path,event.details?.promptPreview,event.details?.errorMessage].join(' ').toLowerCase();
   return !query || text.includes(query);
  });
@@ -129,10 +137,27 @@ function activityRows(events) {
   return `<tr><td>${escape(event.member_name)}</td><td class="request-cell"><b class="mono">${escape(event.model||'—')}</b><span class="request-path">${escape(details?`${details.method} ${details.path}`:'')}</span>${details?.promptPreview?`<span class="request-excerpt">${escape(details.promptPreview.slice(0,140))}</span>`:''}</td><td>${route}</td><td><span class="tag ${activityTone(event)}">${activityResult(event)}</span></td><td class="mono">${(duration/1000).toFixed(1)}s</td><td title="${new Date(event.at).toLocaleString()}">${age(event.at)}</td><td><button class="ghost small" data-action="request-details" data-id="${escape(event.id)}">Details</button></td></tr>`;
  }).join('') || '<tr><td colspan="7" class="muted">No matching requests</td></tr>';
 }
+function activitySelect(name, label, options) {
+ const selected = activityFilters[name];
+ // Keep the selected option visible when its last request leaves the latest 100.
+ if(selected && !options.some(([value])=>value===selected))options=[...options,[selected,selected]];
+ return `<label>${label}<select data-activity-filter="${name}" aria-label="Filter requests by ${label.toLowerCase()}">${options.map(([value,text])=>`<option value="${escape(value)}" ${selected===value?'selected':''}>${escape(text)}</option>`).join('')}</select></label>`;
+}
 function renderActivity() {
  const people = [...new Map(state.history.map(event=>[event.member_id,event.member_name])).entries()];
+ const values = read => [...new Set(state.history.map(read).filter(Boolean))].sort().map(value=>[value,value]);
  const events = matchingActivity();
- return heading('','Activity','','') + `<div class="activity-filters"><input data-activity-filter="search" aria-label="Search requests" placeholder="Search prompts, models, errors…" value="${escape(activityFilters.search)}"><select data-activity-filter="person" aria-label="Filter requests by person"><option value="">All people</option>${people.map(([id,name])=>`<option value="${escape(id)}" ${activityFilters.person===id?'selected':''}>${escape(name)}</option>`).join('')}</select><select data-activity-filter="result" aria-label="Filter requests by result">${[['','All results'],['active','In progress'],['completed','Completed'],['cancelled','Cancelled'],['errors','Errors and limits']].map(([value,label])=>`<option value="${value}" ${activityFilters.result===value?'selected':''}>${label}</option>`).join('')}</select></div><div class="card"><div class="card-head"><div><h2>Recent requests</h2><p>Latest 100 · Details 90 days · Previews 7 days</p></div><span class="tag" id="activity-count">${events.length} requests</span></div><div class="table-wrap"><table><thead><tr><th>Person</th><th>Request</th><th>Route</th><th>Result</th><th>Duration</th><th>When</th><th></th></tr></thead><tbody id="activity-rows">${activityRows(events)}</tbody></table></div></div>`;
+ return heading('','Activity','','') + `<div class="activity-filters" role="group" aria-label="Request filters">
+ <label class="activity-search">Search<input data-activity-filter="search" aria-label="Search requests" placeholder="Search prompts, models, errors…" value="${escape(activityFilters.search)}"></label>
+ ${activitySelect('person','Person',[['','All people'],...people])}
+ ${activitySelect('result','Result',[['','All results'],['active','In progress'],['receiving','Receiving'],['queued','Queued'],['running','Running'],['completed','Completed'],['cancelled','Cancelled'],['errors','Errors and limits'],['limited','Rate limited (429)']])}
+ ${activitySelect('model','Model',[['','All models'],...values(event=>event.model)])}
+ ${activitySelect('provider','Provider',[['','All providers'],['codex','Codex'],['claude','Claude']])}
+ ${activitySelect('route','Route',[['','All routes'],['personal','Personal'],['shared','Shared backup']])}
+ ${activitySelect('endpoint','Endpoint',[['','All endpoints'],...values(event=>event.details?.path)])}
+ ${activitySelect('time','Time range',[['','Any time'],['900000','Last 15 minutes'],['3600000','Last hour'],['86400000','Last 24 hours'],['604800000','Last 7 days']])}
+ <button type="button" data-action="clear-activity-filters" ${Object.values(activityFilters).some(Boolean)?'':'disabled'}>Clear filters</button>
+ </div><div class="card"><div class="card-head"><div><h2>Recent requests</h2><p>Filters apply to the latest 100 · Details 90 days · Previews 7 days</p></div><span class="tag" id="activity-count" role="status">${events.length} requests</span></div><div class="table-wrap"><table><thead><tr><th>Person</th><th>Request</th><th>Route</th><th>Result</th><th>Duration</th><th>When</th><th></th></tr></thead><tbody id="activity-rows">${activityRows(events)}</tbody></table></div></div>`;
 }
 function updateActivityFilter(event) {
  const name = event.target.dataset.activityFilter;
@@ -141,6 +166,7 @@ function updateActivityFilter(event) {
  const rows = matchingActivity();
  document.querySelector('#activity-rows').innerHTML = activityRows(rows);
  document.querySelector('#activity-count').textContent = `${rows.length} requests`;
+ document.querySelector('[data-action="clear-activity-filters"]').disabled = !Object.values(activityFilters).some(Boolean);
 }
 function requestDetails(id) {
  const event = state.history.find(row=>row.id===id);
@@ -285,6 +311,7 @@ document.addEventListener('click',async event=>{
    case 'toggle-global':await api('/settings',{method:'PATCH',body:{paused:!state.settings.paused}});await load();toast(state.settings.paused?'Shared access paused':'Shared access resumed');break;
    case 'pause-person':{const m=state.members.find(m=>m.id===id);await api(`/members/${id}`,{method:'PATCH',body:{paused:!m.paused}});await load();toast(m.paused?'Access resumed':'Access paused');break;}
    case 'request-details':requestDetails(id);break;
+   case 'clear-activity-filters':for(const name of Object.keys(activityFilters))activityFilters[name]='';render();break;
    case 'copy-request-id':await copy(id);break;
    case 'refresh-request':await load();requestDetails(id);break;
    case 'toggle-prompt-previews':await api('/settings',{method:'PATCH',body:{promptPreviews:!state.settings.promptPreviews}});await load();break;
@@ -325,7 +352,7 @@ document.addEventListener('change',async event=>{if(event.target.id!=='auth-file
 modal.addEventListener('close',()=>{if(modal.open)return;cancelPersonalHold?.();if(memberView&&oauth){void api('/member/oauth/cancel',{method:'POST',body:{state:oauth.state}}).catch(()=>{});}secretKey='';oauth=null;document.querySelector('#modal-content').innerHTML='';});
 modal.addEventListener('click',event=>{if(event.target===modal){const r=modal.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)modal.close();}});
 window.addEventListener('hashchange',()=>{page=location.hash.slice(1)||'overview';render();});
-setInterval(()=>{const interval=!memberView&&page==='activity'?5000:30000;if(Date.now()-lastRefreshAt>=interval&&session?.authenticated&&!modal.open&&!document.hidden&&!document.querySelector('input:focus')&&!document.querySelector('#request-limits-form[data-dirty]'))void load(true);},5000);
+setInterval(()=>{const interval=!memberView&&page==='activity'?5000:30000;if(Date.now()-lastRefreshAt>=interval&&session?.authenticated&&!modal.open&&!document.hidden&&!document.querySelector('input:focus, [data-activity-filter]:focus')&&!document.querySelector('#request-limits-form[data-dirty]'))void load(true);},5000);
 (async()=>{try{session=await api(memberView?'/member/session':'/session');if(session.authenticated)await load();else renderLogin();}catch{app.innerHTML='<div class="boot"><p>Could not reach the hub. Reload to try again.</p></div>';}})();
 
 function renderMember(){
