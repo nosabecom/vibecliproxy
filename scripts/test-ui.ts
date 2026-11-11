@@ -98,6 +98,78 @@ try{
  await page.getByLabel('Filter requests by result',{exact:true}).selectOption('cancelled');
  await page.locator('#activity-rows').getByText('Cancelled',{exact:true}).waitFor();
 
+ // Filters combine, retain selections on refresh, and tolerate older metadata.
+ const filterDetails={method:'POST',path:'/v1/responses',state:'finished' as const,startedAt:Date.now(),requestBytes:10,responseBytes:20,queueMs:0,provider:'codex' as const,route:'shared' as const};
+ const otherPerson={...member,id:'filter-other-person',name:'Other person'};
+ store.event(otherPerson,'claude-test',null,200,100,null,{...filterDetails,path:'/v1/messages',provider:'claude',route:'personal',promptPreview:'Filter combination target'},'filter-completed');
+ store.event(member,'test-model',null,102,0,null,{...filterDetails,state:'queued'},'filter-queued');
+ store.event(member,'test-model',null,102,0,null,{...filterDetails,state:'running',route:'personal'},'filter-running');
+ store.event(member,'',null,102,0,null,{method:'POST',path:'/v1/responses',state:'receiving',startedAt:Date.now(),requestBytes:0,responseBytes:0,queueMs:0},'filter-receiving');
+ store.event(otherPerson,'test-model',null,429,10,'reserve_protected',filterDetails,'filter-limited');
+ store.event(otherPerson,'legacy-model',null,200,100,null,undefined,'filter-legacy');
+ store.db.prepare('UPDATE events SET at=? WHERE id=?').run(Date.now()-2*86400000,'filter-limited');
+ store.db.prepare('UPDATE events SET at=? WHERE id=?').run(Date.now()-8*86400000,'filter-legacy');
+ await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+ await page.getByRole('button',{name:'Refresh hub',exact:true}).click();
+ await page.locator('#activity-count').getByText('7 requests',{exact:true}).waitFor();
+ const originalId=store.history().find(event=>event.status===499)!.id;
+ const allIds=store.history().map(event=>event.id).sort();
+ const visibleIds=async()=> (await page.locator('#activity-rows [data-action="request-details"]').evaluateAll(buttons=>buttons.map(button=>(button as HTMLElement).dataset.id))).sort();
+ for(const [label,value,expected] of [
+  ['person',otherPerson.id,['filter-completed','filter-limited','filter-legacy']],
+  ['model','claude-test',['filter-completed']],
+  ['provider','claude',['filter-completed']],
+  ['provider','codex',[originalId,'filter-queued','filter-running','filter-limited']],
+  ['route','personal',['filter-completed','filter-running']],
+  ['route','shared',[originalId,'filter-queued','filter-limited']],
+  ['endpoint','/v1/messages',['filter-completed']],
+  ['time range','900000',[originalId,'filter-completed','filter-queued','filter-running','filter-receiving']],
+  ['time range','3600000',[originalId,'filter-completed','filter-queued','filter-running','filter-receiving']],
+  ['time range','86400000',[originalId,'filter-completed','filter-queued','filter-running','filter-receiving']],
+  ['time range','604800000',[originalId,'filter-completed','filter-queued','filter-running','filter-receiving','filter-limited']],
+  ['result','receiving',['filter-receiving']],
+  ['result','queued',['filter-queued']],
+  ['result','running',['filter-running']],
+  ['result','limited',['filter-limited']],
+  ['result','active',['filter-receiving','filter-queued','filter-running']],
+  ['model','legacy-model',['filter-legacy']],
+ ] as const){
+  await page.getByLabel(`Filter requests by ${label}`,{exact:true}).selectOption(value);
+  assert.deepEqual(await visibleIds(),[...expected].sort(),`${label}: ${value}`);
+  assert.equal(await page.locator('#activity-count').textContent(),`${expected.length} requests`);
+  await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+  assert.deepEqual(await visibleIds(),allIds);
+ }
+ await page.getByLabel('Search requests',{exact:true}).fill('combination target');
+ for(const [label,value] of [['person',otherPerson.id],['result','completed'],['model','claude-test'],['provider','claude'],['route','personal'],['endpoint','/v1/messages'],['time range','86400000']]){
+  await page.getByLabel(`Filter requests by ${label}`,{exact:true}).selectOption(value!);
+ }
+ assert.deepEqual(await visibleIds(),['filter-completed']);
+ await page.getByRole('button',{name:'Refresh hub',exact:true}).click();
+ await page.getByText('Hub refreshed. Provider quota pacing still applies.',{exact:true}).waitFor();
+ assert.equal(await page.getByLabel('Filter requests by provider',{exact:true}).inputValue(),'claude');
+ assert.deepEqual(await visibleIds(),['filter-completed']);
+ await page.getByRole('button',{name:'Overview',exact:true}).click();
+ await page.getByRole('heading',{name:'Overview',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Activity',exact:true}).click();
+ await page.getByRole('heading',{name:'Activity',exact:true}).waitFor();
+ assert.deepEqual(await visibleIds(),['filter-completed']);
+ await page.getByLabel('Filter requests by route',{exact:true}).selectOption('shared');
+ await page.getByText('No matching requests',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+ assert.equal(await page.getByLabel('Search requests',{exact:true}).inputValue(),'');
+ assert.equal(await page.getByRole('button',{name:'Clear filters',exact:true}).isDisabled(),true);
+ assert.deepEqual(await visibleIds(),allIds);
+ await page.getByLabel('Filter requests by model',{exact:true}).selectOption('legacy-model');
+ store.db.prepare('DELETE FROM events WHERE id=?').run('filter-legacy');
+ await page.getByRole('button',{name:'Refresh hub',exact:true}).click();
+ await page.getByText('No matching requests',{exact:true}).waitFor();
+ assert.equal(await page.getByLabel('Filter requests by model',{exact:true}).inputValue(),'legacy-model');
+ await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+ await page.setViewportSize({width:390,height:844});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
+ await page.setViewportSize({width:1440,height:1050});
+
  await page.getByRole('button',{name:'Settings',exact:true}).click();
  await page.getByLabel('Queue wait',{exact:true}).waitFor();
  assert.equal(await page.getByLabel('Queue wait',{exact:true}).inputValue(),'180');

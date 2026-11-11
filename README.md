@@ -85,7 +85,7 @@ References: [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), [manage
 
 ## Detailed activity
 
-The admin Activity view shows incoming, queued, running, completed, blocked and cancelled model requests. Search the latest 100 records by prompt preview, model, endpoint, error or request ID, and filter by person or result. Open **Details** for the request path, client, account route, payload sizes, queue time, first-byte time and error reason. The request ID is also returned as `X-Request-Id`.
+The admin Activity view shows incoming, queued, running, completed, blocked and cancelled model requests. Search the latest 100 records by prompt preview, model, endpoint, error or request ID. Combine filters for person, result (including receiving, queued, running and rate limited), model, provider, route, endpoint and time range. **Clear filters** resets all selections. Filters apply to the latest 100 records; older records without detailed logging only match filters for metadata they contain. Open **Details** for the request path, client, account route, payload sizes, queue time, first-byte time and error reason. The request ID is also returned as `X-Request-Id`.
 
 **Settings → Prompt previews** controls future prompt capture. Previews contain only the latest visible user text. Images, encrypted context, tool output, full request bodies, and authentication headers are excluded. Common key and password patterns are redacted; custom secrets in ordinary prose may still appear. Preview capture starts when enabled, so historical requests have metadata only. On startup, unfinished records are marked as interrupted by a restart.
 
