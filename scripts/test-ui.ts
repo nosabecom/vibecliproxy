@@ -75,7 +75,7 @@ try{
  assert.equal(await page.getByLabel('Switchover quota window',{exact:true}).inputValue(),'hourly');
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
  store.setSettings({...store.settings(),promptPreviews:true});
- store.event(member,'test-model',null,499,120,'client_disconnected',{
+ store.event(member,'test-model','owner-auth',499,120,'client_disconnected',{
   method:'POST',path:'/v1/responses',state:'finished',startedAt:Date.now()-120,finishedAt:Date.now(),
   requestBytes:2048,responseBytes:128,queueMs:30,firstByteMs:60,provider:'codex',route:'shared',accountLabel:'owner-private@test.invalid',
   promptPreview:'Build an application tracker. <script>window.previewXss=true</script>',errorMessage:'Client disconnected',errorPhase:'running',
@@ -101,9 +101,9 @@ try{
  // Filters combine, retain selections on refresh, and tolerate older metadata.
  const filterDetails={method:'POST',path:'/v1/responses',state:'finished' as const,startedAt:Date.now(),requestBytes:10,responseBytes:20,queueMs:0,provider:'codex' as const,route:'shared' as const};
  const otherPerson={...member,id:'filter-other-person',name:'Other person'};
- store.event(otherPerson,'claude-test',null,200,100,null,{...filterDetails,path:'/v1/messages',provider:'claude',route:'personal',promptPreview:'Filter combination target'},'filter-completed');
+ store.event(otherPerson,'claude-test','removed-auth',200,100,null,{...filterDetails,path:'/v1/messages',provider:'claude',route:'personal',accountLabel:'old-claude@test.invalid',promptPreview:'Filter combination target'},'filter-completed');
  store.event(member,'test-model',null,102,0,null,{...filterDetails,state:'queued'},'filter-queued');
- store.event(member,'test-model',null,102,0,null,{...filterDetails,state:'running',route:'personal'},'filter-running');
+ store.event(member,'test-model','friend-auth',102,0,null,{...filterDetails,state:'running',route:'personal',accountLabel:'friend@test.invalid'},'filter-running');
  store.event(member,'',null,102,0,null,{method:'POST',path:'/v1/responses',state:'receiving',startedAt:Date.now(),requestBytes:0,responseBytes:0,queueMs:0},'filter-receiving');
  store.event(otherPerson,'test-model',null,429,10,'reserve_protected',filterDetails,'filter-limited');
  store.event(otherPerson,'legacy-model',null,200,100,null,undefined,'filter-legacy');
@@ -114,9 +114,12 @@ try{
  await page.locator('#activity-count').getByText('7 requests',{exact:true}).waitFor();
  const originalId=store.history().find(event=>event.status===499)!.id;
  const allIds=store.history().map(event=>event.id).sort();
- const visibleIds=async()=> (await page.locator('#activity-rows [data-action="request-details"]').evaluateAll(buttons=>buttons.map(button=>(button as HTMLElement).dataset.id))).sort();
+ const visibleIds=async()=> {await page.locator('#activity-results[aria-busy="false"]').waitFor();return (await page.locator('#activity-rows [data-action="request-details"]').evaluateAll(buttons=>buttons.map(button=>(button as HTMLElement).dataset.id))).sort();};
  for(const [label,value,expected] of [
   ['person',otherPerson.id,['filter-completed','filter-limited','filter-legacy']],
+  ['account','owner-auth',[originalId]],
+  ['account','friend-auth',['filter-running']],
+  ['account','removed-auth',['filter-completed']],
   ['model','claude-test',['filter-completed']],
   ['provider','claude',['filter-completed']],
   ['provider','codex',[originalId,'filter-queued','filter-running','filter-limited']],
@@ -141,7 +144,7 @@ try{
   assert.deepEqual(await visibleIds(),allIds);
  }
  await page.getByLabel('Search requests',{exact:true}).fill('combination target');
- for(const [label,value] of [['person',otherPerson.id],['result','completed'],['model','claude-test'],['provider','claude'],['route','personal'],['endpoint','/v1/messages'],['time range','86400000']]){
+ for(const [label,value] of [['person',otherPerson.id],['account','removed-auth'],['result','completed'],['model','claude-test'],['provider','claude'],['route','personal'],['endpoint','/v1/messages'],['time range','86400000']]){
   await page.getByLabel(`Filter requests by ${label}`,{exact:true}).selectOption(value!);
  }
  assert.deepEqual(await visibleIds(),['filter-completed']);
@@ -166,6 +169,43 @@ try{
  await page.getByText('No matching requests',{exact:true}).waitFor();
  assert.equal(await page.getByLabel('Filter requests by model',{exact:true}).inputValue(),'legacy-model');
  await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+ await visibleIds();
+ // Older shared requests remain reachable beyond the newest 100, including Details.
+ for(let index=0;index<105;index++)store.event(otherPerson,'paging-model','owner-auth',200,100,null,{...filterDetails,route:'personal'},`paging-${String(index).padStart(3,'0')}`);
+ await page.getByRole('button',{name:'Refresh hub',exact:true}).click();
+ await page.locator('#activity-count').getByText('111 requests',{exact:true}).waitFor();
+ await page.getByLabel('Filter requests by time range',{exact:true}).selectOption('604800000');
+ await visibleIds();assert.equal(await page.locator('#activity-count').textContent(),'111 requests');
+ await page.getByLabel('Filter requests by route',{exact:true}).selectOption('shared');
+ assert.deepEqual(await visibleIds(),[originalId,'filter-queued','filter-limited'].sort());
+ await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+ await visibleIds();
+ await page.getByLabel('Requests per page',{exact:true}).selectOption('25');
+ const collected=await visibleIds();assert.equal(collected.length,25);
+ assert.equal(await page.getByRole('button',{name:'← Newer',exact:true}).isDisabled(),true);
+ store.event(otherPerson,'new-arrival',null,200,10,null,undefined,'paging-new-arrival');
+ for(let index=0;index<4;index++){
+  await page.getByRole('button',{name:'Older →',exact:true}).click();
+  collected.push(...await visibleIds());
+ }
+ assert.equal(collected.length,111);assert.equal(new Set(collected).size,111);
+ assert.equal(collected.includes('paging-new-arrival'),false);
+ assert.equal(await page.getByRole('button',{name:'Older →',exact:true}).isDisabled(),true);
+ await page.locator(`#activity-rows [data-id="${originalId}"]`).click();
+ await page.locator('dialog').getByText('Shared backup',{exact:true}).waitFor();
+ await page.locator('dialog').getByText('owner-private@test.invalid',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ await page.getByRole('button',{name:'← Newer',exact:true}).click();
+ assert.equal((await visibleIds()).length,25);
+ await page.getByLabel('Filter requests by account',{exact:true}).selectOption('removed-auth');
+ assert.deepEqual(await visibleIds(),['filter-completed']);
+ assert.equal(await page.getByRole('button',{name:'← Newer',exact:true}).isDisabled(),true);
+ await page.getByRole('button',{name:'Clear filters',exact:true}).click();
+ await visibleIds();
+ await page.getByRole('button',{name:'Latest',exact:true}).click();
+ await visibleIds();assert.equal(await page.locator('#activity-count').textContent(),'112 requests');
+ await page.getByLabel('Requests per page',{exact:true}).selectOption('100');
+ assert.equal((await visibleIds()).length,100);
  await page.setViewportSize({width:390,height:844});
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
  await page.setViewportSize({width:1440,height:1050});
