@@ -85,6 +85,7 @@ export function quotaPeriod(w: QuotaWindow): QuotaPeriod | undefined {
 }
 
 export function routePool(accounts: Account[], member: Member, model: string, safetyMargin: number, now = Date.now(), sharingPaused = false): { accounts: Account[]; shared: boolean; reason: string } {
+  sharingPaused ||= !!member.backupPaused;
   const own = accounts.filter(a => a.ownerMemberId === member.id && a.models.includes(model));
   const personalPolicy = sharingPaused || member.personalOnly ? { ...member, personalSwitchPercent: 100 } : member;
   const ready = own.filter(a => a.available && quotaFresh(a, now) && !personalSwitchReached(a, personalPolicy, now));

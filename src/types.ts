@@ -15,6 +15,7 @@ export interface Member {
   personalSwitchPercent?: number;
   personalSwitchWindow?: QuotaPeriod | 'both';
   personalOnly?: boolean;
+  backupPaused?: boolean;
 }
 export interface RequestLimits {
   queueWaitSeconds: number;
@@ -32,6 +33,8 @@ export interface RequestDetails {
   client?: string; stream?: boolean; inputItems?: number; tools?: number;
   provider?: Provider; route?: 'personal' | 'shared'; accountLabel?: string;
   promptPreview?: string; errorMessage?: string; errorPhase?: string;
+  reviewId?: string;
+  screening?: string;
 }
 export class HttpError extends Error {
   status: number;

@@ -5,6 +5,8 @@ export interface Config {
   adminPasswordHash: string;
   proxyUrl: string; proxyKey: string; managementKey: string;
   oauthBinary?: string; oauthDirectory?: string;
+  decisionsApiKey?: string;
+  pushSubject?: string;
 }
 export function readConfig(env = process.env): Config {
   const publicOrigin = env.PUBLIC_ORIGIN ?? 'http://127.0.0.1:8320';
@@ -17,6 +19,8 @@ export function readConfig(env = process.env): Config {
     adminPasswordHash: env.ADMIN_PASSWORD_HASH ?? '',
     proxyUrl, proxyKey: env.CLIPROXY_API_KEY ?? '', managementKey: env.CLIPROXY_MANAGEMENT_KEY ?? '',
     oauthBinary: env.CLIPROXY_BINARY ?? './bin/cli-proxy-api', oauthDirectory: env.OAUTH_DIRECTORY ?? '.data/onboarding',
+    decisionsApiKey: env.OPENAI_DECISIONS_API_KEY ?? env.OPENAI_API_KEY ?? '',
+    pushSubject: env.PUSH_SUBJECT ?? '',
   };
   if (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error('Invalid port');
   if (!isPasswordHash(config.adminPasswordHash)) throw new Error('Set ADMIN_PASSWORD_HASH before starting the hub');

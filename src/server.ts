@@ -15,6 +15,10 @@ import { promptPreview, redactLogText } from './request-log.ts';
 import { REQUEST_LIMITS } from './settings.ts';
 import { activityQuery } from './activity.ts';
 import type { RequestLimits } from './types.ts';
+import { Reviews } from './reviews.ts';
+import { taskEvidence } from './task-evidence.ts';
+import { Notifications } from './notifications.ts';
+import type { TaskClassifier, ScreeningResult, TaskEvidence } from './review-types.ts';
 
 const MAX_BODY = 4 * 1024 * 1024;
 const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
@@ -32,15 +36,15 @@ function number(value: unknown, name: string, min: number, max: number) { if (ty
 function strings(value: unknown, name: string): string[] { if (!Array.isArray(value) || value.length > 200 || value.some(v => typeof v !== 'string' || !v || v.length > 300)) throw new HttpError(400, `Invalid ${name}`); return [...new Set(value)]; }
 function boolean(value: unknown) { if (typeof value !== 'boolean') throw new HttpError(400, 'Expected true or false'); return value; }
 function memberInput(body: Record<string, any>, previous?: Member) {
-  const b = { name: '', sharePercent: 20, paused: false, allowedModels: [], accountIds: [], expiresAt: null, rpm: 20, fallbackOnly: true, personalSwitchPercent: 100, personalSwitchWindow: 'both', ...previous, ...body };
+  const b = { name: '', sharePercent: 20, paused: false, backupPaused: false, allowedModels: [], accountIds: [], expiresAt: null, rpm: 20, fallbackOnly: true, personalSwitchPercent: 100, personalSwitchWindow: 'both', ...previous, ...body };
   const expiresAt = b.expiresAt === null ? null : number(b.expiresAt, 'Expiry', 1, 9e15);
   if (!['hourly', 'weekly', 'both'].includes(b.personalSwitchWindow)) throw new HttpError(400, 'Choose hourly, weekly, or both for personal switchover');
-  return { name: string(b.name, 'name', 60), sharePercent: number(b.sharePercent, 'Percentage', 0, 100), paused: boolean(b.paused),
+  return { name: string(b.name, 'name', 60), sharePercent: number(b.sharePercent, 'Percentage', 0, 100), paused: boolean(b.paused), backupPaused: boolean(b.backupPaused),
     allowedModels: strings(b.allowedModels, 'models'), accountIds: strings(b.accountIds, 'accounts'), expiresAt, rpm: Math.floor(number(b.rpm, 'Requests per minute', 1, 6000)), fallbackOnly: boolean(b.fallbackOnly),
     personalSwitchPercent: number(b.personalSwitchPercent, 'Personal switchover percentage', 1, 100), personalSwitchWindow: b.personalSwitchWindow as NonNullable<Member['personalSwitchWindow']> };
 }
 
-export function createHub(config: Config, options: { store?: Store; proxy?: CliProxy; loginFactory?: LoginFactory } = {}) {
+export function createHub(config: Config, options: { store?: Store; proxy?: CliProxy; loginFactory?: LoginFactory; classifier?: TaskClassifier } = {}) {
   const basePath = config.basePath ?? '';
   const publicBaseUrl = () => `${config.publicOrigin}${basePath}`;
   const cookiePath = basePath || '/';
@@ -53,7 +57,7 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
   const attempts = new Map<string, { count: number; since: number }>();
   const rates = new Map<string, number[]>();
   const busy = new Map<string, number>();
-  const active = new Map<string, { memberId: string; accountId: string; controller: AbortController; shared: boolean }>();
+  const active = new Map<string, { memberId: string; accountId: string; controller: AbortController; shared: boolean; fingerprint?: string; approved?: boolean }>();
   const waiting = new Set<{ wake(): void; cancel(error: HttpError): void }>();
   let lastPruned = 0;
   let passwordChecks = 0;
@@ -113,6 +117,18 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
     if (memberId || sharedOnly) wakeWaitingRequests();
     else for (const request of waiting) request.cancel(cancellation);
   };
+  const notifications = new Notifications(store, { baseUrl: publicBaseUrl(), ...(config.pushSubject ? { subject: config.pushSubject } : {}),
+    isReviewEligible(id) { const settings = reviews.settings(); if (!settings.enabled || settings.mode !== 'enforce') return false; try { const review = reviews.get(id); return review.status === 'pending' && review.policyVersion === reviews.policy(review.memberId).version; } catch { return false; } },
+  });
+  const reviews = new Reviews(store, {
+    apiKey: config.decisionsApiKey, classifier: options.classifier,
+    onReview(review) { if (reviews.settings().enabled && reviews.settings().mode === 'enforce') notifications.enqueueReview({ id: review.id, memberName: review.memberName, ruleName: review.ruleNames[0], generation: review.generation }); },
+    onResolve(id) { notifications.resolveReview(id); },
+    onHold(memberId, fingerprint, includeApproved) {
+      for (const request of active.values()) if (request.shared && request.memberId === memberId && request.fingerprint === fingerprint && (!request.approved || includeApproved)) request.controller.abort(new HttpError(403, 'This task was paused for owner review', 'task_review_required'));
+      wakeWaitingRequests();
+    },
+  });
   async function removeAccount(id: string, authorize: (account: Account) => void) {
     await proxy.removeAccount(id, authorize);
     for (const request of active.values()) {
@@ -127,6 +143,8 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
     if (!member) throw new HttpError(401, 'A valid sharing key is required', 'invalid_api_key');
     let model = ''; let account: Account | undefined; const started = Date.now();
     let upstreamSignal: AbortSignal | undefined;
+    let claimed = false;
+    let approvalTimer: NodeJS.Timeout | undefined;
     let queuedAt: number | undefined;
     const requestId = randomUUID();
     const declaredBytes = Number(req.headers['content-length']);
@@ -152,6 +170,8 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
       }
       if (req.method !== 'POST' || !['/v1/responses', '/v1/responses/compact', '/v1/chat/completions', '/v1/messages', '/v1/messages/count_tokens'].includes(path)) throw new HttpError(404, 'This endpoint is not available');
       const body = await readJson(req, store.settings().maxInputMiB * 1024 * 1024, details); model = string(body.model, 'model', 200);
+      let evidence: TaskEvidence | undefined;
+      let screening: ScreeningResult | undefined;
       details.stream = body.stream === true;
       details.inputItems = Array.isArray(body.input) ? body.input.length : Array.isArray(body.messages) ? body.messages.length : typeof body.input === 'string' ? 1 : 0;
       details.tools = Array.isArray(body.tools) ? body.tools.length : 0;
@@ -180,14 +200,29 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
         }
         const settings = store.settings();
         const pool = routePool(proxy.accounts, current, model, settings.safetyMargin, Date.now(), settings.paused);
-        if (pool.shared && settings.paused) throw new HttpError(403, 'Shared backup access is paused', 'access_paused');
+        if (pool.shared && (settings.paused || current.backupPaused)) throw new HttpError(403, 'Shared backup access is paused', 'access_paused');
+        if (pool.shared && pool.accounts.length) {
+          evidence ??= taskEvidence(body);
+          if (!screening || screening.policyVersion !== reviews.policy(current.id).version) {
+            screening = await reviews.screen(current, evidence, requestId);
+            details.screening = `${screening.source}${screening.recordedRules?.length ? ` · Recorded: ${screening.recordedRules.join(', ')}` : ''}${!screening.blocked && screening.reason ? ` · ${screening.reason}` : ''}`;
+            details.reviewId = screening.reviewId;
+            store.progress(requestId, model, null, details);
+            if (screening.blocked) throw new HttpError(403, screening.hardBlocked ? `${screening.reason}. This task is not allowed on shared backup; do not retry.` : `${screening.reason}. This task is paused for hub owner review; do not retry until the owner decides.`, screening.hardBlocked ? 'task_blocked' : 'task_review_required');
+            // Re-read identity, quotas, routing and slot availability after the
+            // asynchronous classifier. No provider slot is held while screening.
+            continue;
+          }
+        }
         account = pool.accounts.filter(candidate => (busy.get(candidate.id) ?? 0) < settings.concurrentRequestsPerAccount).sort((a, b) => Math.max(...a.windows.map(w => w.usedPercent)) - Math.max(...b.windows.map(w => w.usedPercent)))[0];
         if (account) {
           // There is no await between checking availability and claiming the account.
+          if (pool.shared && evidence && screening) reviews.claim(current, evidence, screening);
           busy.set(account.id, (busy.get(account.id) ?? 0) + 1);
+          claimed = true;
           recent.push(Date.now());
           rates.set(current.id, recent);
-          active.set(requestId, { memberId: current.id, accountId: account.id, controller, shared: pool.shared });
+          active.set(requestId, { memberId: current.id, accountId: account.id, controller, shared: pool.shared, fingerprint: evidence?.fingerprint, approved: screening?.source === 'approval' });
           details.state = 'running';
           details.queueMs = queuedAt === undefined ? 0 : Date.now() - queuedAt;
           details.provider = account.provider;
@@ -208,6 +243,7 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
           store.progress(requestId, model, null, details);
         }
         await waitForAccount(controller.signal, remaining);
+        screening = undefined;
         details.queueMs = Date.now() - queuedAt;
         res.removeHeader('Retry-After');
       }
@@ -223,6 +259,11 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
       // Never forward caller routing/identity headers. Account choice belongs to the gateway.
       for (const name of ['anthropic-version', 'anthropic-beta']) if (typeof req.headers[name] === 'string') headers[name] = req.headers[name];
       upstreamSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(store.settings().providerTimeoutSeconds * 1000)]);
+      if (active.get(requestId)?.shared && reviews.settings().enabled && reviews.settings().mode === 'enforce' && screening?.source === 'approval' && screening.reviewId) {
+        const expires = reviews.get(screening.reviewId).approvalExpiresAt ?? 0;
+        approvalTimer = setTimeout(() => { if (reviews.settings().enabled && reviews.settings().mode === 'enforce') controller.abort(new HttpError(403, 'This task approval expired', 'task_review_required')); }, Math.max(1, expires - Date.now()));
+        approvalTimer.unref();
+      }
       const upstream = await fetch(`${config.proxyUrl}${path}`, { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error', signal: upstreamSignal });
       res.writeHead(upstream.status, { 'Content-Type': upstream.headers.get('content-type') ?? 'application/json', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
       let errorBody = '';
@@ -266,7 +307,8 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
       store.event(member, model, account?.id ?? null, failure.status, Date.now() - started, failure.code, details, requestId);
       throw failure;
     } finally {
-      if (account) {
+      clearTimeout(approvalTimer);
+      if (account && claimed) {
         const remaining = (busy.get(account.id) ?? 1) - 1;
         if (remaining > 0) busy.set(account.id, remaining); else busy.delete(account.id);
         active.delete(requestId);
@@ -367,9 +409,10 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
         const visible = proxy.accounts.filter(a => a.ownerMemberId === member.id || (a.ownerMemberId === null && (!member.accountIds.length || member.accountIds.includes(a.id))));
         const accounts = visible.map((a, index) => ({ id: hash(a.id).slice(0, 16), email: a.ownerMemberId === member.id ? a.email : `Backup ${index + 1}`, provider: a.provider,
           personal: a.ownerMemberId === member.id, enabled: a.enabled, available: a.available, windows: a.windows, checkedAt: a.checkedAt, models: a.models.filter(m => !member.allowedModels.length || member.allowedModels.includes(m)),
-          error: a.error ? 'Quota unavailable' : undefined, exhausted: exhausted(a), switchReached: personalSwitchReached(a, settings.paused || member.personalOnly ? { ...member, personalSwitchPercent: 100 } : member), headroom: a.ownerMemberId === member.id ? null : eligibility(a, member, settings.safetyMargin).headroom }));
+          error: a.error ? 'Quota unavailable' : undefined, exhausted: exhausted(a), switchReached: personalSwitchReached(a, settings.paused || member.backupPaused || member.personalOnly ? { ...member, personalSwitchPercent: 100 } : member), headroom: a.ownerMemberId === member.id ? null : member.backupPaused ? 0 : eligibility(a, member, settings.safetyMargin).headroom }));
         const { keyHash: _, accountIds: __, ...safeMember } = member;
         return json(res, 200, { member: safeMember, accounts, settings: { paused: settings.paused, safetyMargin: settings.safetyMargin, promptPreviews: !!settings.promptPreviews }, summary: store.memberSummary(member.id),
+          reviewStatus: { enabled: reviews.settings().enabled, pendingCount: reviews.settings().enabled && reviews.settings().mode === 'enforce' ? reviews.pendingCount(member.id) : 0, backupPaused: !!member.backupPaused },
           history: store.memberHistory(member.id).map((event: any) => ({ at: event.at, model: event.model, status: event.status, duration: event.duration, reason: event.reason })),
           currentRoute: [...active.values()].some(r => r.memberId === member.id && r.shared) ? 'backup' : [...active.values()].some(r => r.memberId === member.id) ? 'personal' : 'idle',
           publicOrigin: config.publicOrigin, publicBaseUrl: publicBaseUrl(), csrf, proxy: { error: proxy.error ? 'Hub connection unavailable' : null, lastSync: proxy.lastSync } });
@@ -403,8 +446,33 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
       if (path === '/api/state' && req.method === 'GET') {
         const members = store.members(); const settings = store.settings();
         return json(res, 200, { settings, requestLimits: REQUEST_LIMITS, accounts: proxy.accounts, members: members.map(m => ({ ...publicMember(m), access: proxy.accounts.map(a => ({ accountId: a.id, ...eligibility(a, a.ownerMemberId === m.id ? { ...m, sharePercent: 100, accountIds: [] } : m, a.ownerMemberId === m.id ? 0 : settings.safetyMargin) })) })),
-          history: store.history(), summary: store.summary(), proxy: { error: proxy.error, lastSync: proxy.lastSync }, publicOrigin: config.publicOrigin, publicBaseUrl: publicBaseUrl(), csrf });
+          history: store.history(), reviews: reviews.state(), summary: store.summary(), proxy: { error: proxy.error, lastSync: proxy.lastSync }, publicOrigin: config.publicOrigin, publicBaseUrl: publicBaseUrl(), csrf });
       }
+      if (path === '/api/reviews' && req.method === 'GET') return json(res, 200, reviews.state());
+      if (path === '/api/review-settings' && req.method === 'PATCH') {
+        const settings = reviews.configure(await readJson(req)); wakeWaitingRequests();
+        if (settings.enabled && settings.mode === 'enforce') {
+          stopRequests(undefined, true);
+          for (const review of reviews.state().items) if (review.status === 'pending') notifications.enqueueReview({ id: review.id, memberName: review.memberName, ruleName: review.ruleNames[0], generation: review.generation });
+        } else notifications.cancelReviewAlerts();
+        return json(res, 200, settings);
+      }
+      if (path === '/api/review-rules' && req.method === 'POST') { const rule = reviews.saveRule(await readJson(req)); if (reviews.settings().enabled && reviews.settings().mode === 'enforce') stopRequests(undefined, true); return json(res, 201, rule); }
+      const ruleMatch = path.match(/^\/api\/review-rules\/([a-zA-Z0-9-]+)$/);
+      if (ruleMatch && req.method === 'PATCH') { const rule = reviews.saveRule(await readJson(req), ruleMatch[1]!); if (reviews.settings().enabled && reviews.settings().mode === 'enforce') stopRequests(undefined, true); return json(res, 200, rule); }
+      if (ruleMatch && req.method === 'DELETE') { reviews.deleteRule(ruleMatch[1]!); if (reviews.settings().enabled && reviews.settings().mode === 'enforce') stopRequests(undefined, true); return json(res, 200, { ok: true }); }
+      const decisionMatch = path.match(/^\/api\/reviews\/([a-f0-9-]+)\/decision$/);
+      if (decisionMatch && req.method === 'POST') { const review = reviews.decide(decisionMatch[1]!, await readJson(req)); wakeWaitingRequests(); return json(res, 200, review); }
+      if (path === '/api/notifications' && req.method === 'GET') return json(res, 200, notifications.state());
+      if (path === '/api/notifications' && req.method === 'PATCH') return json(res, 200, notifications.configure(await readJson(req)));
+      if (path === '/api/notifications/subscriptions' && req.method === 'POST') {
+        const input = await readJson(req);
+        try { return json(res, 201, { id: notifications.subscribe(input as any) }); }
+        catch (error) { throw error instanceof HttpError ? error : new HttpError(400, error instanceof Error ? error.message : 'Invalid browser subscription'); }
+      }
+      const notificationMatch = path.match(/^\/api\/notifications\/subscriptions\/([a-f0-9-]+)$/);
+      if (notificationMatch && req.method === 'DELETE') { notifications.unsubscribe(notificationMatch[1]!); return json(res, 200, { ok: true }); }
+      if (path === '/api/notifications/test' && req.method === 'POST') return json(res, 202, notifications.test());
       if (path === '/api/activity' && req.method === 'GET') return json(res, 200, store.activity(activityQuery(url.searchParams)));
       if (path === '/api/refresh' && req.method === 'POST') { await proxy.sync(); return json(res, 200, { ok: !proxy.error }); }
       if (path === '/api/settings' && req.method === 'PATCH') {
@@ -429,7 +497,7 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
       if (match) {
         const id = match[1]!;
         if (match[2] && req.method === 'POST') { const key = store.rotate(id); stopRequests(id); return json(res, 200, { key }); }
-        if (!match[2] && req.method === 'PATCH') { const member = store.member(id); Object.assign(member, memberInput(await readJson(req), member)); store.save(member); stopRequests(id); return json(res, 200, publicMember(member)); }
+        if (!match[2] && req.method === 'PATCH') { const body = await readJson(req); const member = store.member(id); Object.assign(member, memberInput(body, member)); store.save(member); stopRequests(id, Object.keys(body).every(key => key === 'backupPaused')); return json(res, 200, publicMember(member)); }
         if (!match[2] && req.method === 'DELETE') { store.remove(id); stopRequests(id); return json(res, 200, { ok: true }); }
       }
       if (path === '/api/oauth/start' && req.method === 'POST') {
@@ -470,16 +538,16 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
       }
       throw new HttpError(404, 'Endpoint not found');
     }
-    const files: Record<string, [string, string]> = { '/': ['index.html', 'text/html; charset=utf-8'], '/me': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
+    const files: Record<string, [string, string]> = { '/': ['index.html', 'text/html; charset=utf-8'], '/me': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/sw.js': ['sw.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
     if (req.method !== 'GET' || !files[path]) throw new HttpError(404, 'Not found');
     const [file, type] = files[path];
     const raw = await readFile(`${publicDir}${file}`);
     const content = file === 'index.html' ? raw.toString().replace(/(href|src)="\/(favicon\.svg|style\.css|app\.js)"/g, `$1="${basePath}/$2"`) : raw;
-    res.writeHead(200, { 'Content-Type': type }); res.end(content);
+    res.writeHead(200, { 'Content-Type': type, ...(file === 'sw.js' ? { 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': `${basePath}/` } : {}) }); res.end(content);
   }
   const server = createServer((req, res) => {
     if (Date.now() - lastPruned > 3600_000) {
-      lastPruned = Date.now(); store.prune();
+      lastPruned = Date.now(); store.prune(); reviews.prune();
       for (const [id, expires] of sessions) if (expires < Date.now()) sessions.delete(id);
       for (const [id, value] of memberSessions) if (value.expires < Date.now()) memberSessions.delete(id);
       for (const [id, value] of attempts) if (Date.now() - value.since > 900_000) attempts.delete(id);
@@ -494,7 +562,7 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
   server.requestTimeout = 30_000; server.headersTimeout = 15_000;
   server.on('upgrade', (_req, socket) => { socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\nUse HTTP/SSE so sharing controls apply.'); });
   let closing: Promise<void> | undefined;
-  const close = () => closing ??= onboarding.close();
+  const close = () => { reviews.close(); notifications.close(); return closing ??= onboarding.close(); };
   server.on('close', () => void close());
-  return { server, store, proxy, stopRequests, close };
+  return { server, store, proxy, reviews, notifications, stopRequests, close };
 }

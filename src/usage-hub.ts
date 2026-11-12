@@ -29,7 +29,7 @@ export function usageCall(proxy: CliProxy, store: Store, member: Member, body: R
   if (proxy.error || !quotaFresh(account)) return wrap(503, { error: 'A fresh quota reading is unavailable' });
   const settings = store.settings(), own = account.ownerMemberId === member.id;
   const primary = proxy.accounts.filter(a => a.ownerMemberId === member.id && a.provider === account.provider);
-  const backupLocked = !own && (member.personalOnly || settings.paused || !account.available ||
+  const backupLocked = !own && (member.personalOnly || member.backupPaused || settings.paused || !account.available ||
     (member.fallbackOnly && (!primary.length || !primary.every(a => personalSwitchReached(a, member)))));
   const ceiling = Math.max(0, member.sharePercent - settings.safetyMargin);
   const used = (percent: number) => own ? percent : backupLocked || ceiling <= 0 ? 100 : Math.min(100, percent / ceiling * 100);

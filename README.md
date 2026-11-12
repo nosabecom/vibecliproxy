@@ -18,7 +18,7 @@ The friend dashboard also has **Use mine**. Open it, read the warning, and hold 
 
 ## Run locally
 
-Requires Node.js 24+ and pnpm. Runtime uses only Node's HTTP server and SQLite; no production npm dependencies.
+Requires Node.js 24+ and pnpm. Runtime uses Node's HTTP server and SQLite, plus `web-push` for encrypted browser notifications.
 
 ```sh
 pnpm install
@@ -49,9 +49,15 @@ Tailscale Serve mounts the hub at **https://ewaste.tail3123d8.ts.net/cliproxy** 
 ssh ewaste bash -s < scripts/bootstrap-host.sh
 # Set ADMIN_PASSWORD_HASH before starting vibe-hub; a missing hash prevents startup.
 
-# Deploy built runtime files, without node_modules or credentials:
+# Prepare production dependencies locally; e-waste does not need pnpm:
 pnpm build
-tar -czf /tmp/vibe-hub-runtime.tar.gz dist public package.json scripts/set-admin-password.ts src/auth.ts
+mkdir -p .data/runtime/scripts .data/runtime/src
+cp package.json pnpm-lock.yaml .data/runtime/
+pnpm --dir .data/runtime install --prod --frozen-lockfile --ignore-scripts
+cp -a dist public .data/runtime/
+cp scripts/set-admin-password.ts .data/runtime/scripts/
+cp src/auth.ts .data/runtime/src/
+tar -czf /tmp/vibe-hub-runtime.tar.gz -C .data/runtime .
 scp /tmp/vibe-hub-runtime.tar.gz ewaste:/tmp/vibe-hub-runtime.tar.gz
 ssh ewaste 'tar -xzf /tmp/vibe-hub-runtime.tar.gz -C /home/nosa/vibecliproxy && systemctl --user enable --now vibe-hub && systemctl --user restart vibe-hub'
 ssh ewaste 'sudo -n tailscale serve --bg --https=443 --set-path=/cliproxy http://127.0.0.1:8320'
@@ -98,3 +104,32 @@ Use **Older →** and **← Newer** to browse results, choose 25, 50 or 100 requ
 Admins can choose **Accounts → Remove** on any connection. Members can choose **Your accounts → Remove** for their own connections in the friend dashboard. A confirmation identifies the connection before deleting its saved credential from CLIProxy. Ongoing requests using that account stop; other accounts and request history remain available. Members cannot remove shared backup or another member’s connection. Reconnecting requires signing in again. Removed accounts in an explicit backup pool stay selected as unavailable until the admin edits the pool, so removal never silently grants access to every backup.
 
 **Pause sharing** uses each member’s personal accounts up to their provider’s actual quota limits, bypassing the switchover percentage while shared backup is paused. Resuming sharing restores the percentage rule. Pausing sharing stops ongoing backup requests; ongoing personal requests continue.
+
+## Task reviews and browser notifications
+
+**Reviews** has Pending, History and Rules. The default application rule blocks carrying out job or internship applications on someone’s behalf, including preparatory steps within that active application task. Career advice, job research without applying, resume feedback, materials the person will use themselves, and interview preparation remain allowed. Blocked tasks cannot receive scoped approval or be reopened while the rule applies. Add custom rules with descriptions, exceptions, catch/allow examples, selected people, and review, hard-block or record-only actions. Rule edits invalidate cached decisions and previous approvals. **People → Pause backup** stops only that person's shared backup and uses their personal accounts up to their actual provider limits.
+
+Screening starts **disabled**, in Observe mode, until configured and verified. Set `OPENAI_DECISIONS_API_KEY` in the private server `.env`, restart the hub, then enable screening in Reviews → Rules. The key must belong to the API organization holding the intended credits. It is never returned to the browser. OpenAI Decisions uses `gpt-6-luna`; provider-side prompt caching is explicitly disabled and the local cache handles reuse. Observe records potential reviews without stopping requests or sending push notifications. Enforce holds shared requests only after a positive match to an enabled review/block rule. Uncertainty alone never creates a hold. Personal routes do not spend classifier credits. Provider errors, unavailable context, and screening-budget exhaustion are recorded as warnings in Activity and allow requests without a rule match. Existing confirmed rule matches remain enforced. This deliberately favors avoiding unrelated blocks; application intent hidden entirely in unavailable context or arriving while screening is unavailable may be missed.
+
+Task identity is derived from complete visible user/system/developer instructions and the request's `instructions` and Anthropic `system` fields, after line-ending normalization. Exact standalone continuations such as “go on” inherit the included objective. A continuation without visible task context cannot inherit another task's approval. Assistant output, tool observations, previews, model request IDs and conversation IDs do not grant approval. Images/files, stored-response or conversation references, stored prompts, and opaque compaction do not create automatic holds. The classifier evaluates available visible instructions, retaining an included application objective across continuations. Standalone continuations without visible intent are allowed with a warning, rather than inheriting an unrelated task’s decision. Selected evidence has an 8 MiB memory limit (12 MiB including serialized rules and framing). Large requests use the OpenAI input-token counting endpoint with all evidence and questions, plus a framing allowance. Screening admits up to an estimated 1,000,000 input tokens, leaving headroom within Luna’s 1,050,000-token window. Requests beyond that model capacity skip classification with an Activity warning and continue without a rule match; their evidence is never silently truncated. Raising a limit does not pad inputs or increase billing by itself. Token preflight runs only when the byte-based upper bound exceeds the token ceiling; local cache hits skip both counting and classification. See the [token counting guide](https://developers.openai.com/api/docs/guides/token-counting) and [Luna model limits](https://developers.openai.com/api/docs/models/gpt-6-luna). This is an intent guard based on visible instructions; it cannot recover an objective hidden in encrypted or omitted context. New instructions and policy revisions produce new fingerprints. The default fixed cache expiry is one hour.
+
+Approve a known task for **30 minutes or 25 shared requests** by default, with owner-selected limits of 1–60 minutes and 1–500 requests. Counts are claimed atomically before forwarding; expiry stops an active approved stream. The final admitted requests can finish when the request count is exhausted, while further requests pause. New objectives need a fresh check. Existing access restrictions, reserve checks and rate limits still apply. Repeated holds are grouped into one task review and each API request retains its request ID and review link in Activity. Previously blocked HTTP calls are not replayed automatically. Decisions have a separate retained audit history.
+
+Default screening budgets are **$2.50 per UTC day and $80 per UTC calendar month**, independently configurable. The hub reserves a conservative cost before making a classifier call, then reconciles reported input usage, including the 2× input rate above 272,000 tokens; failed calls retain the reservation because billing may be unknown. This budget covers only this hub's screening, not other API usage or subscription quota. It is separate from the API credit grant's billing-cycle expiry. Reviews store only fingerprints, decision metadata, and up to 600 redacted characters each of objective/latest evidence; complete request bodies are never persisted. Review evidence is separate from the optional Activity prompt-preview setting and expires after seven days without an update. Finished reviews and owner decision history are retained for 90 days. Members see their own hold count, without owner evidence or rule details.
+
+**Settings → Notifications** enables browser Web Push. Register each device through **Enable on this device**, grant browser notification permission, enable delivery, then use **Send test notification**. The HTTPS mounted service worker handles notifications without caching admin pages or API responses. VAPID keys are generated in the private database; only the public key is exposed. A new review queues one logical alert per browser, retrying failures through a durable outbox. An optional reminder is sent once for an unresolved review. Reopening a task or exhausting an approval creates a new notification episode. History reports queued/accepted/failed: push-provider acceptance does not prove that an OS displayed the notification. The notification opens the owner review; it never approves a task. Desktop Chrome generally must remain running, and browser/OS permission and Android background behavior must be verified on each device. The reusable Android webhook app is a separate future integration.
+
+```sh
+pnpm test
+pnpm typecheck
+pnpm test:ui
+node scripts/test-reviews-ui.ts
+pnpm build
+node scripts/verify-reviews.ts
+# On a machine with Codex installed, also verifies an isolated config.toml:
+node scripts/verify-reviews.ts --codex
+```
+
+The smoke verifier uses a fresh private database and CODEX_HOME with a fake provider and classifier. It verifies routing without spending real subscription quota. It does not replace an accuracy evaluation against the real Decisions API or an actual device notification test.
+
+Add `--decisions-key-file /private/path/to/key` to use real Decisions classification with the mock inference provider. This spends classifier API credits only. The key is read from the file, never passed to Codex or printed. Keep this optional verification separate from ordinary tests.
