@@ -87,7 +87,6 @@ nav button.active .nav-count { background: #dce1d4; border-color: transparent; }
 .topbar { height: 72px; padding: 0 40px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .breadcrumb { display: flex; gap: 14px; align-items: center; color: var(--muted); font-size: 12px; }
 .breadcrumb b { font-weight: 500; color: var(--text); }
-.breadcrumb-host { font-family: var(--mono); }
 .top-actions { display: flex; gap: 16px; align-items: center; }
 .status-pill { display: inline-flex; gap: 7px; align-items: center; font-size: 11px; color: var(--muted); }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: #6ca174; display: inline-block; flex-shrink: 0; }
@@ -95,6 +94,7 @@ nav button.active .nav-count { background: #dce1d4; border-color: transparent; }
 .dot.off { background: #7b8379; }
 .mobile-logout { display: none; }
 .content { max-width: 1500px; margin: 0 auto; padding: 36px 40px 28px; }
+.page-heading h1 { margin: 0; }
 .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 32px; }
 .eyebrow { display: flex; align-items: center; gap: 10px; font: 10px var(--mono); letter-spacing: 1.3px; color: var(--muted); text-transform: uppercase; margin-bottom: 12px; }
 .eyebrow span { color: #a3a799; }
@@ -125,8 +125,7 @@ p { margin: 6px 0 0; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .capacity-panel { background: #26372d; border-radius: var(--radius); color: #f4f4e9; overflow: hidden; display: flex; flex-direction: column; }
 .capacity-panel .card-head { align-items: flex-start; padding-bottom: 18px; }
-.capacity-panel .eyebrow { color: #b3c1ab; font-size: 9px; margin-bottom: 8px; }
-.capacity-panel h2 { font-size: 29px; letter-spacing: -1px; font-weight: 450; }
+.capacity-panel h2 { font-size: 22px; letter-spacing: -.6px; font-weight: 500; }
 .capacity-panel .card-head p { color: #b3c1ab; font-size: 11px; }
 .capacity-panel button.ghost { color: #c0ceba; border-color: #ffffff25; border-radius: 50%; width: 34px; padding: 6px; }
 .capacity-panel button.ghost:hover { background: #ffffff12; }
@@ -414,7 +413,6 @@ summary:hover { color: var(--text); }
   .metric-foot { font-size: 10px; }
   .metric-value { font-size: 32px; margin: 10px 0 6px; }
   .capacity-panel .card-head { padding: 22px 20px 18px; }
-  .capacity-panel h2 { font-size: 30px; }
   .capacity-list { padding-inline: 20px; }
   .capacity-row { gap: 12px; }
   .capacity-account { gap: 10px; }
@@ -485,8 +483,6 @@ summary:hover { color: var(--text); }
 @media (max-width: 380px) {
   .content { padding-inline: 16px; }
   .topbar { padding-inline: 16px; }
-  .breadcrumb-host { display: none; }
-  .breadcrumb > span:nth-child(2) { display: none; }
   .heading-actions button { padding-inline: 11px; font-size: 12px; }
   .capacity-account .provider-icon { display: none; }
   .card-head { gap: 10px; }
