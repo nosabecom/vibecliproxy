@@ -267,13 +267,12 @@ dialog .info-note { margin-top: 20px; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 #toast.error { background: #8b3529; border-color: #b44938; color: #fff3e7; }
 .login-screen { min-height: 100dvh; display: grid; grid-template-columns: 1.1fr 1fr; padding: 20px; gap: 24px; }
-.login-intro { display: flex; flex-direction: column; justify-content: center; padding: clamp(32px, 5vw, 90px); border-radius: 14px; background: #26372d; color: #f3f3e5; }
-.login-kicker { font: 10px var(--mono); letter-spacing: 1.3px; color: #c3d1b1; }
-.login-intro > p { margin: 48px 0; font-size: clamp(38px, 5.5vw, 84px); line-height: 1.08; letter-spacing: -3px; font-weight: 400; }
-.login-intro em { font-style: normal; color: #d9e8b6; }
-.login-caption { font-size: 13px; color: #b3c1ab; }
+.login-intro { display: flex; align-items: center; justify-content: center; padding: clamp(28px, 4vw, 64px); border-radius: 14px; background: #26372d; color: #f3f3e5; }
+.login-intro .brand { padding: 0; gap: 18px; font-size: clamp(40px, 5vw, 72px); letter-spacing: -3px; }
+.login-intro .brand-tag { font-size: inherit; letter-spacing: inherit; }
+.login-intro .brand-mark { width: 72px; height: 72px; border-radius: 18px; }
+.login-intro .brand-mark .icon { width: 48px; height: 48px; }
 .login-card { align-self: center; justify-self: center; max-width: 360px; width: 100%; padding: 32px 0; }
-.login-card .brand { padding: 0; margin-bottom: 64px; }
 .login-card h1 { font-size: 34px; letter-spacing: -1.5px; }
 .login-card form { margin-top: 28px; }
 .login-card button.primary { width: 100%; margin-top: 20px; justify-content: space-between; }
@@ -476,12 +475,11 @@ summary:hover { color: var(--text); }
   .member-metrics .metric-foot { grid-column: 1; grid-row: 2; padding-right: 12px; margin-top: 4px; max-width: 220px; }
   .member-layout .page-heading > .tag { margin-top: 12px; }
   .login-screen { display: block; padding: 24px; }
-  .login-intro { min-height: 280px; padding: 28px; margin-bottom: 38px; }
-  .login-intro > p { margin: 24px 0; font-size: 44px; letter-spacing: -2px; }
-  .login-kicker { font-size: 8px; }
-  .login-caption { font-size: 11px; }
+  .login-intro { min-height: 180px; padding: 24px; margin-bottom: 38px; }
+  .login-intro .brand { font-size: 42px; gap: 12px; letter-spacing: -2px; }
+  .login-intro .brand-mark { width: 48px; height: 48px; border-radius: 12px; }
+  .login-intro .brand-mark .icon { width: 32px; height: 32px; }
   .login-card { margin: 0 auto; padding: 0 0 24px; }
-  .login-card .brand { margin-bottom: 32px; }
   .login-card h1 { font-size: 30px; }
 }
 @media (max-width: 380px) {
