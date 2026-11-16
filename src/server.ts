@@ -538,11 +538,11 @@ export function createHub(config: Config, options: { store?: Store; proxy?: CliP
       }
       throw new HttpError(404, 'Endpoint not found');
     }
-    const files: Record<string, [string, string]> = { '/': ['index.html', 'text/html; charset=utf-8'], '/me': ['index.html', 'text/html; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/sw.js': ['sw.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
+    const files: Record<string, [string, string]> = { '/': ['index.html', 'text/html; charset=utf-8'], '/me': ['index.html', 'text/html; charset=utf-8'], '/theme.js': ['theme.js', 'text/javascript; charset=utf-8'], '/app.js': ['app.js', 'text/javascript; charset=utf-8'], '/sw.js': ['sw.js', 'text/javascript; charset=utf-8'], '/style.css': ['style.css', 'text/css; charset=utf-8'], '/fonts/geist-latin.ttf': ['fonts/geist-latin.ttf', 'font/ttf'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
     if (req.method !== 'GET' || !files[path]) throw new HttpError(404, 'Not found');
     const [file, type] = files[path];
     const raw = await readFile(`${publicDir}${file}`);
-    const content = file === 'index.html' ? raw.toString().replace(/(href|src)="\/(favicon\.svg|style\.css|app\.js)"/g, `$1="${basePath}/$2"`) : raw;
+    const content = file === 'index.html' ? raw.toString().replace(/(href|src)="\/(favicon\.svg|style\.css|app\.js|theme\.js)"/g, `$1="${basePath}/$2"`) : raw;
     res.writeHead(200, { 'Content-Type': type, ...(file === 'sw.js' ? { 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': `${basePath}/` } : {}) }); res.end(content);
   }
   const server = createServer((req, res) => {

@@ -264,6 +264,8 @@ test('mounted paths serve assets, scope sessions, advertise correct endpoints an
  const html=await (await fetch(s.base)).text();
  assert.ok(html.includes('src="/cliproxy/app.js"'));assert.ok(html.includes('href="/cliproxy/style.css"'));
  assert.equal((await fetch(`${s.base}/app.js`)).status,200);
+ assert.ok(html.includes('src="/cliproxy/theme.js"'));assert.equal((await fetch(`${s.base}/theme.js`)).status,200);
+ const font=await fetch(`${s.base}/fonts/geist-latin.ttf`);assert.equal(font.status,200);assert.equal(font.headers.get('content-type'),'font/ttf');assert.ok((await font.arrayBuffer()).byteLength>1000);
  assert.equal((await fetch(`${s.base}/me`)).status,200);
  const state=await(await s.admin('/state')).json();assert.equal(state.publicBaseUrl,'http://localhost/cliproxy');
  assert.equal((await s.infer()).status,200);assert.equal(s.calls.length,1);
