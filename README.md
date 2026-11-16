@@ -6,6 +6,8 @@ A private CLIProxyAPI gateway for T3 Code. Friends use their own accounts first;
 - **Friend:** `/cliproxy/me` — connect personal accounts, personal limits, shared backup headroom, endpoint, and their own activity.
 - **Models:** `/cliproxy/v1/models`; inference supports HTTP/SSE Responses, Chat Completions, and Claude Messages. WebSocket upgrades are blocked.
 
+The sun/moon control on sign-in, admin, and friend screens switches between light and dark mode. The hub follows the system theme until you choose a mode, then remembers your choice in this browser.
+
 ## Percentage rules
 
 A 20% ceiling stops backup requests when **total reported account usage** reaches 20% in any reported reset window. Your usage counts too. It does not create a separate 20% token wallet. People share the same pool; their percentages do not add together.
@@ -16,7 +18,7 @@ Personal accounts are exempt from the owner's backup ceiling. In **People → Ma
 
 Quota readouts and bars show **how much is left**. Account cards show remaining provider quota; Overview highlights the lowest remaining window per account. Shared backup shows the fraction of the usable backup allowance remaining after the safety margin, with the corresponding provider-quota points beneath it. Missing, failed, stale, or reset-pending readings show unavailable. These readouts do not imply that backup routing is currently eligible; its status is shown separately. **People → Manage → Protected reserve** sets how much quota to keep; for example, an 80% reserve corresponds to a 20% backup ceiling. The early-stop margin protects additional quota.
 
-The friend dashboard also has **Use mine**. Open it, read the warning, and hold **Hold to use mine** for two seconds (mouse, touch, Space, or Enter). This bypasses the personal switchover percentage and uses only that member’s accounts up to the provider’s actual limits. It stops their running shared backup requests and never falls back to the owner’s accounts, including when personal quota is exhausted or unavailable. Access pauses, expiry, model restrictions, request limits, and fresh quota checks still apply. The mode persists across sign-ins, restarts, and quota resets until the member chooses **Restore automatic routing**. Other people’s routing and the configured thresholds stay unchanged.
+The friend dashboard has **Use mine** directly below its summary. Open it, read the warning, and hold **Hold to use mine** for two seconds (mouse, touch, Space, or Enter). This bypasses the personal switchover percentage and uses only that member’s accounts up to the provider’s actual limits. It stops their running shared backup requests and never falls back to the owner’s accounts, including when personal quota is exhausted or unavailable. Access pauses, expiry, model restrictions, request limits, and fresh quota checks still apply. The mode persists across sign-ins, restarts, and quota resets until the member chooses **Restore automatic routing**. Other people’s routing and the configured thresholds stay unchanged.
 
 ## Run locally
 

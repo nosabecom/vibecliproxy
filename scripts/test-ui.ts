@@ -45,9 +45,27 @@ const cached='/home/nosa/.cache/ms-playwright/chromium_headless_shell-1234/chrom
 const browser=await chromium.launch({...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:existsSync(cached)?{executablePath:cached}:{}),headless:true});
 const errors:string[]=[];mkdirSync('.data/screenshots',{recursive:true});
 try{
- const context=await browser.newContext({extraHTTPHeaders:{'Tailscale-User-Login':'owner@test.invalid'},viewport:{width:1440,height:1050}});
+ const context=await browser.newContext({extraHTTPHeaders:{'Tailscale-User-Login':'owner@test.invalid'},viewport:{width:1440,height:1050},colorScheme:'light'});
  const page=await context.newPage();page.on('pageerror',e=>{errors.push(e.message);console.log('Browser error:',e.message)});page.on('response',async r=>{if(r.status()>=400) console.log('HTTP error',r.status(),new URL(r.url()).pathname,await r.text())});
  await page.goto(mountedUrl);await page.getByRole('heading',{name:'Admin sign-in',exact:true}).waitFor();await page.screenshot({path:'.data/screenshots/sign-in.png',fullPage:true});
+ // Follow the system until a user chooses a theme; survive blocked storage.
+ const systemContext=await browser.newContext({colorScheme:'dark'}),systemPage=await systemContext.newPage();
+ await systemPage.goto(mountedUrl);await systemPage.getByRole('heading',{name:'Admin sign-in',exact:true}).waitFor();
+ assert.equal(await systemPage.locator('html').getAttribute('data-theme'),'dark');
+ await systemPage.emulateMedia({colorScheme:'light'});await systemPage.waitForFunction(()=>document.documentElement.dataset.theme==='light');
+ await systemPage.getByRole('button',{name:'Switch to dark mode',exact:true}).click();
+ await systemPage.emulateMedia({colorScheme:'dark'});await systemPage.emulateMedia({colorScheme:'light'});
+ await systemPage.reload();assert.equal(await systemPage.locator('html').getAttribute('data-theme'),'dark');
+ await systemContext.close();
+ const restricted=await browser.newContext({colorScheme:'light'});
+ await restricted.addInitScript(()=>Object.defineProperty(window,'localStorage',{get(){throw new DOMException('Blocked','SecurityError');}}));
+ const restrictedPage=await restricted.newPage();await restrictedPage.goto(mountedUrl);
+ await restrictedPage.getByRole('button',{name:'Switch to dark mode',exact:true}).click();
+ assert.equal(await restrictedPage.locator('html').getAttribute('data-theme'),'dark');await restricted.close();
+ await page.getByRole('button',{name:'Switch to dark mode',exact:true}).click();
+ await page.reload();assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
+ assert.equal(await page.locator('meta[name="theme-color"]').getAttribute('content'),'#141a17');
+ await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
  await page.getByLabel('Password',{exact:true}).fill(adminPassword);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.getByRole('heading',{name:'Overview',exact:true}).waitFor();
  await page.screenshot({path:'.data/screenshots/admin-empty.png',fullPage:true});
  await page.getByRole('button',{name:'Add a person',exact:true}).first().click();
@@ -266,6 +284,9 @@ try{
  await page.getByText('More parallel requests can overshoot',{exact:false}).waitFor();
  await page.getByLabel('Queue wait',{exact:true}).fill('240');
  await page.getByLabel('Parallel requests per account',{exact:true}).fill('2');
+ await page.getByRole('button',{name:'Switch to dark mode',exact:true}).click();
+ assert.equal(await page.getByLabel('Queue wait',{exact:true}).inputValue(),'240');
+ await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
  await page.locator('[data-action=toggle-prompt-previews]').click();
  await page.getByRole('button',{name:'Disabled',exact:true}).waitFor();
  assert.equal(await page.getByLabel('Queue wait',{exact:true}).inputValue(),'240');
@@ -287,22 +308,33 @@ try{
  await page.getByText('supports_websockets = false',{exact:false}).waitFor();
  await page.getByText('CODEX_HOME shown for each T3 server',{exact:false}).waitFor();
  // Every destination must fit narrow phones, tablets, and desktop widths.
+ for(const theme of ['light','dark']){
+ if(await page.locator('html').getAttribute('data-theme')!==theme)await page.getByRole('button',{name:`Switch to ${theme} mode`,exact:true}).click();
  for(const width of [1440,1024,768,390,320]){
   await page.setViewportSize({width,height:1000});
   for(const [id,label] of [['overview','Overview'],['people','People'],['accounts','Accounts'],['activity','Activity'],['reviews','Reviews'],['connect','Connect T3 Code'],['settings','Settings']]){
    await page.locator(`nav [data-page="${id}"]`).click();
    await page.getByRole('heading',{name:id==='connect'?'Connection':label,exact:true}).waitFor();
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,`${label} overflows at ${width}px`);
-   if(width===1440||width===390)await page.screenshot({path:`.data/screenshots/${id}-${width}.png`,fullPage:true});
+   if(width===1440||width===390)await page.screenshot({path:`.data/screenshots/${id}-${width}-${theme}.png`,fullPage:true});
   }
- }
+ }}
+ await page.getByRole('button',{name:'Switch to light mode',exact:true}).click();
  await page.setViewportSize({width:1440,height:1050});
  await page.getByRole('button',{name:'Overview',exact:true}).click();await page.screenshot({path:'.data/screenshots/admin-desktop.png',fullPage:true});
  await page.setViewportSize({width:390,height:844});await page.screenshot({path:'.data/screenshots/admin-mobile.png',fullPage:true});
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
- const friend=await browser.newContext({viewport:{width:1440,height:1000}});const memberPage=await friend.newPage();memberPage.on('pageerror',e=>errors.push(e.message));
+ const friend=await browser.newContext({viewport:{width:1440,height:1000},colorScheme:'light'});const memberPage=await friend.newPage();memberPage.on('pageerror',e=>errors.push(e.message));
  await memberPage.goto(`${mountedUrl}/me`);await memberPage.getByLabel('Access key',{exact:true}).fill(key);await memberPage.getByRole('button',{name:'Sign in',exact:true}).click();
  await memberPage.getByRole('heading',{name:'Friend',exact:true}).waitFor();assert.equal(await memberPage.getByText('owner-private@test.invalid').count(),0);assert.equal(await memberPage.locator('[data-owner]').count(),0);assert.equal(await memberPage.getByText('Build an application tracker.',{exact:false}).count(),0);
+ await memberPage.getByRole('button',{name:'Switch to dark mode',exact:true}).click();
+ await memberPage.reload();assert.equal(await memberPage.locator('html').getAttribute('data-theme'),'dark');
+ assert.equal(await memberPage.locator('.member-metrics').evaluate(el=>el.nextElementSibling?.classList.contains('member-routing')),true);
+ assert.equal(await memberPage.getByRole('region',{name:'Use mine',exact:true}).count(),1);
+ await memberPage.getByRole('button',{name:'Use mine',exact:true}).click();
+ await memberPage.getByRole('button',{name:'Hold to use mine',exact:true}).waitFor();
+ await memberPage.getByRole('button',{name:'Cancel',exact:true}).click();
+ await memberPage.getByRole('button',{name:'Switch to light mode',exact:true}).click();
  await memberPage.getByText('Backup with 60% left · hourly session',{exact:true}).waitFor();
  await memberPage.getByText('Backup available',{exact:true}).waitFor();
  const policy=memberPage.getByRole('region',{name:'Switch to backup',exact:true});
@@ -419,7 +451,13 @@ try{
  await memberPage.getByText('Management key: your access key.',{exact:false}).waitFor();
  await memberPage.getByText('Cancelled',{exact:true}).waitFor();
  await memberPage.locator('#toast.show').waitFor({state:'hidden'});
+ for(const theme of ['dark','light']){
+ await memberPage.getByRole('button',{name:`Switch to ${theme} mode`,exact:true}).click();
  for(const width of [320,390,768,1024,1440]){await memberPage.setViewportSize({width,height:1000});assert.equal(await memberPage.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,`Member view overflows at ${width}px`);}
+ await memberPage.screenshot({path:`.data/screenshots/friend-desktop-${theme}.png`,fullPage:true});
+ await memberPage.setViewportSize({width:390,height:844});await memberPage.screenshot({path:`.data/screenshots/friend-mobile-${theme}.png`,fullPage:true});
+ }
+ await memberPage.setViewportSize({width:1440,height:1000});
  await memberPage.screenshot({path:'.data/screenshots/friend-desktop.png',fullPage:true});
  await memberPage.setViewportSize({width:390,height:844});await memberPage.screenshot({path:'.data/screenshots/friend-mobile.png',fullPage:true});assert.equal(await memberPage.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false);
  assert.equal(await memberPage.locator('[data-action=remove-account]').count(),2);
@@ -452,5 +490,5 @@ try{
  await memberPage.getByRole('button',{name:'Sign out'}).click();await memberPage.getByRole('heading',{name:'Your access',exact:true}).waitFor();
  await page.setViewportSize({width:1440,height:1050});await page.getByRole('button',{name:'Sign out',exact:true}).click();await page.reload();await page.getByRole('heading',{name:'Admin sign-in',exact:true}).waitFor();
  assert.equal((await context.request.get(`${mountedUrl}/api/state`)).status(),401);
- assert.deepEqual(errors,[]);console.log('UI checks passed: create/edit access, account assignment, member self-service sign-in, usage hub instructions, isolated friend login/logout, mouse/keyboard/touch hold confirmation and cancellation, persistent personal-only routing, remaining-quota math and unavailable readings, complementary reserve/switchover controls, all destinations at 320–1440px, keyboard skip navigation, no browser errors.');
+ assert.deepEqual(errors,[]);console.log('UI checks passed: create/edit access, account assignment, member self-service sign-in, usage hub instructions, isolated friend login/logout, mouse/keyboard/touch hold confirmation and cancellation, persistent personal-only routing, remaining-quota math and unavailable readings, complementary reserve/switchover controls, all destinations in both themes at 320–1440px, system theme and saved preference, restricted storage, routing control position, keyboard skip navigation, no browser errors.');
 }finally{await browser.close();hub.server.closeAllConnections();hub.server.close();store.close();}
